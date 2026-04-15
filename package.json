@@ -2,16 +2,22 @@
   "name": "lobster-ic",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "demo:seed": "tsx scripts/demo-seed.ts"
+    "demo:seed": "tsx scripts/demo-seed.ts",
+    "agent:research": "tsx scripts/research-agent.ts",
+    "agent:submit": "tsx scripts/submit-portfolio.ts",
+    "agent:run": "tsx scripts/autonomous-runner.ts --once",
+    "agent:loop": "tsx scripts/autonomous-runner.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",
     "@fontsource/ibm-plex-sans": "^5.2.7",
+    "dotenv": "^17.4.2",
     "next": "16.2.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
@@ -27,5 +33,14 @@
     "tailwindcss": "^4",
     "tsx": "^4.19.3",
     "typescript": "^5"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "sharp",
+      "unrs-resolver"
+    ],
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

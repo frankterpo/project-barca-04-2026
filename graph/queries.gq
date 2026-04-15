@@ -1,0 +1,301 @@
+// ── reads ───────────────────────────────────────────────────────
+
+query holdings_for_run($run_id: String)
+  @description("All holdings in a portfolio run with weight and conviction")
+{
+    match {
+        $run: PortfolioRun { run_id: $run_id }
+        $run holds $co
+    }
+    return {
+        $co.ticker,
+        $co.name,
+        $run.holds.weight_pct,
+        $run.holds.conviction_band
+    }
+    order { $run.holds.weight_pct desc }
+}
+
+query company_evidence($ticker: String)
+  @description("All evidence linked to a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $ev supports $co
+    }
+    return { $ev.evidence_id, $ev.title, $ev.source, $ev.excerpt }
+}
+
+query company_analysts($ticker: String)
+  @description("Analyst reports for a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co analyzedBy $rpt
+    }
+    return { $rpt.report_id, $rpt.role, $rpt.score, $rpt.summary }
+}
+
+query company_verdict($ticker: String)
+  @description("Chair verdict for a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co decided $v
+    }
+    return {
+        $v.verdict_id,
+        $v.confidence,
+        $v.allocation_rationale,
+        $v.verdict,
+        $v.dissent
+    }
+}
+
+query evidence_search($q: Vector(1536), $text: String)
+  @description("Hybrid vector + text search over evidence")
+{
+    match {
+        $ev: Evidence
+    }
+    return { $ev.evidence_id, $ev.title, $ev.excerpt }
+    order { rrf(nearest($ev.embedding, $q), bm25($ev.title, $text)) }
+    limit 20
+}
+
+query all_runs()
+  @description("List all portfolio runs")
+{
+    match { $r: PortfolioRun }
+    return { $r.run_id, $r.branch_label, $r.portfolio_value_usd, $r.updated_at }
+    order { $r.updated_at desc }
+}
+
+// ── mutations ───────────────────────────────────────────────────
+
+query upsert_company($ticker: String, $name: String, $sector: String)
+  @description("Insert or update a company node")
+{
+    insert Company {
+        ticker: $ticker,
+        name:   $name,
+        sector: $sector
+    }
+}
+
+query upsert_evidence($evidence_id: String, $title: String, $source: String, $excerpt: String)
+  @description("Insert or update an evidence node")
+{
+    insert Evidence {
+        evidence_id: $evidence_id,
+        title:       $title,
+        source:      $source,
+        excerpt:     $excerpt
+    }
+}
+
+query link_evidence($evidence_id: String, $ticker: String)
+  @description("Create a Supports edge from evidence to company")
+{
+    insert Supports {
+        from: $evidence_id,
+        to:   $ticker
+    }
+}
+
+// ── financial & research mutations ──────────────────────────────
+
+query upsert_financial_metric(
+    $metric_id: String, $metric_name: String, $period: String,
+    $value: F64, $cadence: String, $unit: String, $cala_metric_uuid: String
+)
+  @description("Insert or update a financial metric")
+{
+    insert FinancialMetric {
+        metric_id:        $metric_id,
+        metric_name:      $metric_name,
+        period:           $period,
+        value:            $value,
+        cadence:          $cadence,
+        unit:             $unit,
+        cala_metric_uuid: $cala_metric_uuid
+    }
+}
+
+query link_metric($ticker: String, $metric_id: String)
+  @description("Link a company to a financial metric")
+{
+    insert HasMetric {
+        from: $ticker,
+        to:   $metric_id
+    }
+}
+
+query upsert_cala_evidence(
+    $evidence_id: String, $entity_uuid: String,
+    $source_api: String, $raw_excerpt: String, $timestamp: String
+)
+  @description("Insert or update Cala API evidence")
+{
+    insert CalaEvidence {
+        evidence_id: $evidence_id,
+        entity_uuid: $entity_uuid,
+        source_api:  $source_api,
+        raw_excerpt: $raw_excerpt,
+        timestamp:   $timestamp
+    }
+}
+
+query link_cala_evidence($ticker: String, $evidence_id: String)
+  @description("Link a company to Cala evidence")
+{
+    insert HasCalaEvidence {
+        from: $ticker,
+        to:   $evidence_id
+    }
+}
+
+query upsert_research_finding(
+    $finding_id: String, $finding_type: String,
+    $summary: String, $score: F64, $run_id: String
+)
+  @description("Insert or update a research finding")
+{
+    insert ResearchFinding {
+        finding_id:   $finding_id,
+        finding_type: $finding_type,
+        summary:      $summary,
+        score:        $score,
+        run_id:       $run_id
+    }
+}
+
+query link_finding($ticker: String, $finding_id: String)
+  @description("Link a company to a research finding")
+{
+    insert HasFinding {
+        from: $ticker,
+        to:   $finding_id
+    }
+}
+
+query link_supply_chain($from_ticker: String, $to_ticker: String, $context: String)
+  @description("Create a supply chain edge between companies")
+{
+    insert SuppliesTo {
+        from:    $from_ticker,
+        to:      $to_ticker,
+        context: $context
+    }
+}
+
+query link_competes($ticker_a: String, $ticker_b: String)
+  @description("Create a competitive relationship between companies")
+{
+    insert CompetesWith {
+        from: $ticker_a,
+        to:   $ticker_b
+    }
+}
+
+query create_portfolio_run(
+    $run_id: String, $branch_label: String,
+    $portfolio_value_usd: F64, $updated_at: String
+)
+  @description("Create a new portfolio run node")
+{
+    insert PortfolioRun {
+        run_id:              $run_id,
+        branch_label:        $branch_label,
+        portfolio_value_usd: $portfolio_value_usd,
+        updated_at:          $updated_at
+    }
+}
+
+query link_holding($run_id: String, $ticker: String, $weight_pct: F64, $conviction_band: String)
+  @description("Link a portfolio run to a company holding")
+{
+    insert Holds {
+        from:            $run_id,
+        to:              $ticker,
+        weight_pct:      $weight_pct,
+        conviction_band: $conviction_band
+    }
+}
+
+// ── financial & research reads ──────────────────────────────────
+
+query company_financials($ticker: String)
+  @description("All financial metrics for a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co hasMetric $m
+    }
+    return { $m.metric_id, $m.metric_name, $m.period, $m.value, $m.cadence, $m.unit }
+    order { $m.period desc, $m.metric_name asc }
+}
+
+query company_cala_evidence($ticker: String)
+  @description("All Cala API evidence for a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co hasCalaEvidence $ev
+    }
+    return { $ev.evidence_id, $ev.source_api, $ev.raw_excerpt, $ev.timestamp }
+    order { $ev.timestamp desc }
+}
+
+query company_findings($ticker: String)
+  @description("All research findings for a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co hasFinding $f
+    }
+    return { $f.finding_id, $f.finding_type, $f.summary, $f.score }
+    order { $f.score desc }
+}
+
+query company_full_profile($ticker: String)
+  @description("Full company profile including financials, evidence, findings, analysts, and verdicts")
+{
+    match {
+        $co: Company { ticker: $ticker }
+    }
+    return {
+        $co.ticker, $co.name, $co.sector,
+        metrics:   ($co hasMetric $m) => { $m.metric_name, $m.period, $m.value, $m.cadence },
+        evidence:  ($co hasCalaEvidence $ev) => { $ev.source_api, $ev.raw_excerpt },
+        findings:  ($co hasFinding $f) => { $f.finding_type, $f.summary, $f.score },
+        analysts:  ($co analyzedBy $rpt) => { $rpt.role, $rpt.score, $rpt.summary },
+        verdict:   ($co decided $v) => { $v.confidence, $v.verdict, $v.allocation_rationale }
+    }
+}
+
+query portfolio_with_reasoning($run_id: String)
+  @description("Portfolio run with full per-stock reasoning chain for leaderboard qualitative scoring")
+{
+    match {
+        $run: PortfolioRun { run_id: $run_id }
+        $run holds $co
+    }
+    return {
+        $co.ticker, $co.name, $co.sector,
+        weight:    $run.holds.weight_pct,
+        band:      $run.holds.conviction_band,
+        findings:  ($co hasFinding $f) => { $f.finding_type, $f.summary, $f.score },
+        evidence:  ($co hasCalaEvidence $ev) => { $ev.source_api, $ev.raw_excerpt },
+        verdict:   ($co decided $v) => { $v.verdict, $v.confidence, $v.allocation_rationale }
+    }
+    order { $run.holds.weight_pct desc }
+}
+
+query all_companies()
+  @description("List all companies in the graph")
+{
+    match { $co: Company }
+    return { $co.ticker, $co.name, $co.sector }
+    order { $co.ticker asc }
+}

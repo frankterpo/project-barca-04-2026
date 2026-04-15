@@ -20,3 +20,8 @@ Key routing rules:
 - Architecture review → invoke plan-eng-review
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
+
+## Health Stack
+
+- typecheck: pnpm tsc --noEmit
+- lint: pnpm lint

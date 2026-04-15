@@ -1,0 +1,114 @@
+// Lobster IC — investment committee knowledge graph
+//
+// Nodes: the entities analysts and agents interact with.
+// Edges: typed relationships that the committee walks during review.
+
+// ── core entities ──────────────────────────────────────────────
+
+node Company {
+    ticker:   String  @key
+    name:     String  @index
+    sector:   String?
+    market_cap_usd: F64?
+}
+
+node PortfolioRun {
+    run_id:             String @key
+    branch_label:       String
+    benchmark_note:     String?
+    portfolio_value_usd: F64
+    updated_at:         String
+}
+
+node Evidence {
+    evidence_id: String @key
+    title:       String @index
+    source:      String?
+    excerpt:     String?
+    embedding:   Vector(1536) @embed(title, excerpt)
+}
+
+node AnalystReport {
+    report_id: String @key
+    role:      enum(quality, growth, risk)
+    score:     F64
+    summary:   String
+}
+
+node ChairVerdict {
+    verdict_id:           String @key
+    confidence:           F64
+    allocation_rationale: String
+    verdict:              enum(overweight, neutral, underweight)
+    dissent:              String?
+}
+
+node JudgeAnswer {
+    answer_id:    String @key
+    preset_id:    I32
+    answer:       String
+    dissent:      String?
+}
+
+// ── financial & research entities ──────────────────────────────
+
+node FinancialMetric {
+    metric_id:    String @key     // "{ticker}:{metric_name}:{period}"
+    metric_name:  String @index
+    period:       String          // "2024", "2023", "2024Q3", etc.
+    value:        F64
+    cadence:      String          // "1y", "1q", "i"
+    unit:         String?
+    cala_metric_uuid: String?     // original Cala FinancialMetric UUID
+}
+
+node CalaEvidence {
+    evidence_id:  String @key     // "{ticker}:cala:{hash}"
+    entity_uuid:  String          // Cala entity UUID
+    source_api:   String          // "entity_search" | "introspection" | "retrieve_entity" | "knowledge_search"
+    raw_excerpt:  String
+    timestamp:    String
+}
+
+node ResearchFinding {
+    finding_id:   String @key     // "{ticker}:{finding_type}:{run_id}"
+    finding_type: String @index   // "revenue_growth" | "margin_analysis" | "sector_position" | etc.
+    summary:      String
+    score:        F64
+    run_id:       String?
+}
+
+// ── relationships ──────────────────────────────────────────────
+
+edge Holds: PortfolioRun -> Company {
+    weight_pct:      F64
+    conviction_band: enum(A, B, C)
+}
+
+edge Supports: Evidence -> Company
+
+edge AnalyzedBy: Company -> AnalystReport
+
+edge Decided: Company -> ChairVerdict
+
+edge Judged: Company -> JudgeAnswer
+
+edge Cites: AnalystReport -> Evidence
+
+edge JudgeCites: JudgeAnswer -> Evidence
+
+edge BelongsToRun: Company -> PortfolioRun
+
+// ── financial & research edges ─────────────────────────────────
+
+edge HasMetric: Company -> FinancialMetric
+
+edge HasCalaEvidence: Company -> CalaEvidence
+
+edge HasFinding: Company -> ResearchFinding
+
+edge SuppliesTo: Company -> Company {
+    context: String?
+}
+
+edge CompetesWith: Company -> Company
