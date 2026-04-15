@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+:root {
+  --bg-app: #0b0d10;
+  --bg-elevated: #12151a;
+  --bg-muted: #1a1f27;
+  --border-subtle: #2a3140;
+  --text-primary: #e8eaef;
+  --text-secondary: #9aa3b2;
+  --text-muted: #6b7280;
+  --accent: #e85d4c;
+  --accent-muted: #c24a3d;
+  --positive: #34d399;
+  --warning: #fbbf24;
+  --negative: #f87171;
+  --font-sans-stack: var(--font-ibm-plex-sans), system-ui, sans-serif;
+  --font-mono-stack: var(--font-ibm-plex-mono), ui-monospace, monospace;
+}
+
+@theme inline {
+  --color-bg-app: var(--bg-app);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-bg-muted: var(--bg-muted);
+  --color-border-subtle: var(--border-subtle);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-muted: var(--accent-muted);
+  --color-positive: var(--positive);
+  --color-warning: var(--warning);
+  --color-negative: var(--negative);
+  --font-sans: var(--font-sans-stack);
+  --font-mono: var(--font-mono-stack);
+}
+
+body {
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--font-sans-stack);
+}
