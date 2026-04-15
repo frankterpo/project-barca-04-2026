@@ -1,0 +1,34 @@
+---
+description: Activate pre-merge review discipline when running /review or preparing to merge
+globs:
+  - "**/CHANGELOG*.md"
+---
+
+# Pre-Merge Review Discipline
+
+When reviewing code for merge, follow this protocol.
+
+## Review checklist
+1. Run `/review` — check for SQL safety, trust boundary violations, conditional side effects, structural issues
+2. If demo-critical: also get Codex Adversary review (separate CLI session)
+3. Compare findings: note overlap vs unique issues
+
+## Codex Adversary output format (when used)
+
+```
+## Codex Review
+- **Verdict:** PASS | FAIL
+- **Findings:**
+  - [P1] [description]
+  - [P2] [description]
+- **Overlap with /review:** [what both caught]
+- **Unique to Codex:** [what only Codex found]
+```
+
+## Operating rules
+- No merge without `/review` passing
+- Demo-critical merges require both `/review` + Codex findings
+- After fixes, re-run `/qa` before final merge
+
+## Operational note
+`/codex` is skipped in Cursor's host config. Run Codex CLI in a separate terminal session and paste results back.

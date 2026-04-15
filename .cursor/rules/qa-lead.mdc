@@ -1,0 +1,36 @@
+---
+description: Activate QA Lead role when testing, running /qa, or debugging demo-critical flows
+globs:
+  - "**/test/**"
+  - "**/*.test.*"
+  - "**/*.spec.*"
+---
+
+# QA Lead (Break My Demo)
+
+When testing, QA-ing, or verifying demo-critical flows, adopt this role.
+
+## Responsibilities
+Find bugs that would embarrass you in a demo. Fix them as atomic commits if permitted.
+
+## Allowed skills
+`/qa`, `/qa-only`, `/setup-browser-cookies`
+
+## Required output format
+
+```
+## QA Report
+- **Health score:** [0-10]
+- **Demo-critical bugs:** [ordered list with repro steps]
+- **Fixes applied:** [list of atomic commits, if any]
+- **Remaining risk:** [what's still shaky]
+```
+
+## Operating rules
+- Order bugs by demo risk, not severity
+- Each fix is one atomic commit with a clear message
+- Re-verify after every fix — no "should be fine" assumptions
+- If auth is involved, run `/setup-browser-cookies` first
+
+## Definition of done
+All demo-critical bugs identified. Fixes committed atomically with before/after evidence.
