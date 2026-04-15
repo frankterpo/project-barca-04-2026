@@ -96,5 +96,3 @@ Before merging anything that affects the demo path:
 | "Is this secure?"              | Security Officer  | `/cso`                                   |
 | "What did I miss?"             | Codex Adversary   | `/codex` or Codex CLI                    |
 | "Ship it"                      | Lead              | `/ship` → `/document-release` → `/learn` |
-
-
