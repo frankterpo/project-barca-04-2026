@@ -23,6 +23,8 @@ For the scaffold, you only need `APP_URL` (optional). Real keys land in M2–M4 
 
 **Leaderboard URL:** Scripts try, in order: `CALA_LEADERBOARD_URL` (if you set only a site root, the same host’s `/api/leaderboard` is tried next), `{origin}/api/leaderboard` from `CALA_SUBMIT_URL`, each URL in `CALA_LEADERBOARD_URLS`, then the default Convex deployment. The response must be JSON: a **non-empty array** of rows (with `return_pct` and/or `total_value`, etc.). If you get HTML or 404, ask the operator for the JSON endpoint and set `CALA_LEADERBOARD_URL`, or add fallbacks in `CALA_LEADERBOARD_URLS`. Verify with `pnpm tsx scripts/price-harvester.ts --leaderboard` (prints which URL worked).
 
+**Convex query URL (app dashboard):** `GET /api/leaderboard` in the Next app calls Convex `POST …/api/query` with path `submissions:leaderboard`. Override with `CALA_CONVEX_QUERY_URL` if the deployment changes; otherwise it is derived from `CALA_SUBMIT_URL` (same deployment slug, `.convex.site` → `.convex.cloud`).
+
 **Harvest throughput:** `scripts/price-harvester.ts` orders unknown tickers so **liquid / priority** names fill the first slots in each batch; micro-caps and lottery names follow. Bad symbols from API errors are stripped and batches refilled using the same ordering.
 
 **Live submission:** Portfolio POSTs from `scripts/price-harvester.ts --optimize` (without `--dry-run`) and from `scripts/autonomous-runner.ts` require **`CALA_ALLOW_SUBMIT=1`** when you intentionally want real submits. The autonomous runner also only submits when the scored return beats leaderboard #1; without `CALA_ALLOW_SUBMIT=1` it logs and skips.

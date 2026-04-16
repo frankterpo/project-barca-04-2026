@@ -293,6 +293,15 @@ query portfolio_with_reasoning($run_id: String)
     order { $run.holds.weight_pct desc }
 }
 
+query latest_run()
+  @description("Most recent portfolio run")
+{
+    match { $r: PortfolioRun }
+    return { $r.run_id, $r.branch_label, $r.portfolio_value_usd, $r.return_pct, $r.updated_at }
+    order { $r.updated_at desc }
+    limit 1
+}
+
 query all_companies()
   @description("List all companies in the graph")
 {

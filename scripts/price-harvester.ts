@@ -825,6 +825,7 @@ const badTickers = new Set<string>([
   "GRNH", "ACCD", "TALKW", "FLGC", "HEXO", "APHA", "DCFC", "ASTR", "RDFN", "IRNT", "VJET",
   "NIOBF", "LTHM", "PLL", "ALTM", "VERV", "VLTA",
   "CSSE", "PARA", "DISCA", "VIAC", "LRNG", "TWOU", "APPH", "CYBR", "SCWX", "EVBG",
+  "MOND",
   ...loadPersistedBadTickers(),
 ]);
 
@@ -1233,30 +1234,53 @@ async function optimize(dryRun: boolean) {
     return;
   }
 
-  console.log(`   Submitting...`);
-
   const teamId = process.env.CALA_TEAM_ID?.trim();
   if (!teamId) throw new Error("CALA_TEAM_ID required");
 
   const apiKey = process.env.CALA_API_KEY?.trim();
   const authHeaders: Record<string, string> = apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
 
-  let result: Record<string, unknown>;
-  try {
-    result = await fetchJsonWithTimeout<Record<string, unknown>>(submitUrl(), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders },
-      body: JSON.stringify({
-        team_id: teamId,
-        model_agent_name: "optimized",
-        model_agent_version: `${bestStrategy.name}_v1`,
-        transactions: bestStrategy.allocs,
-      }),
-    });
-  } catch (error) {
-    console.error(`   ❌ Failed: ${error instanceof Error ? error.message : String(error)}`);
-    return;
+  async function trySubmit(allocs: Allocation[], stratName: string, attempt: number): Promise<Record<string, unknown> | null> {
+    console.log(`   Submitting (attempt ${attempt})...`);
+    try {
+      return await fetchJsonWithTimeout<Record<string, unknown>>(submitUrl(), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({
+          team_id: teamId,
+          model_agent_name: "optimized",
+          model_agent_version: `${stratName}_v${attempt}`,
+          transactions: allocs,
+        }),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(`   ❌ Failed: ${msg}`);
+      const rejected = extractBadTicker(msg);
+      if (rejected && attempt < 5) {
+        console.log(`   🔄 Removing rejected ticker "${rejected}" and retrying...`);
+        badTickers.add(rejected);
+        savePersistedBadTickers(badTickers);
+        if (db.prices[rejected]) delete db.prices[rejected];
+        savePriceDB(db);
+        const cleaned = Object.values(db.prices)
+          .filter(e => !badTickers.has(e.ticker))
+          .sort((a, b) => b.returnPct - a.returnPct);
+        if (cleaned.length < MIN_STOCKS) {
+          console.error(`   ❌ Not enough valid tickers after removing ${rejected}`);
+          return null;
+        }
+        const newAllocs = allocationsForStrategy(stratName, cleaned);
+        const err = validateAllocations(newAllocs);
+        if (err) { console.error(`   ❌ Rebuild failed: ${err}`); return null; }
+        return trySubmit(newAllocs, stratName, attempt + 1);
+      }
+      return null;
+    }
   }
+
+  const result = await trySubmit(bestStrategy.allocs, bestStrategy.name, 1);
+  if (!result) return;
 
   const value = result.total_value as number;
   const invested = result.total_invested as number;
@@ -1382,6 +1406,21 @@ function buildDualConcentration(
   return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
 }
 
+function allocationsForStrategy(name: string, entries: PriceEntry[]): Allocation[] {
+  switch (name) {
+    case "max_concentrate":
+      return buildMaxConcentration(entries);
+    case "top_weighted":
+      return buildTopWeighted(entries);
+    case "return_proportional":
+      return buildReturnProportional(entries);
+    case "dual_concentrate":
+      return buildDualConcentration(entries);
+    default:
+      return buildMaxConcentration(entries);
+  }
+}
+
 async function autoLoop() {
   console.log("\n🔄 AUTO LOOP MODE — harvest → optimize → repeat\n");
   let round = 0;
@@ -1469,6 +1508,21 @@ async function printLeaderboardCli() {
     .map((row, i) => ({ row, i, pct: rowReturnPct(row) }))
     .filter((x): x is typeof x & { pct: number } => x.pct !== null)
     .sort((a, b) => b.pct - a.pct);
+
+  if (teamId) {
+    const idx = enriched.findIndex((x) => String(x.row.team_id ?? x.row.team ?? "") === teamId);
+    if (idx >= 0) {
+      const ours = enriched[idx]!.pct;
+      const top = enriched[0]!.pct;
+      console.log(
+        `\n  Your rank: ${idx + 1} / ${enriched.length}  |  return ${(ours >= 0 ? "+" : "") + ours.toFixed(2)}%  |  gap vs #1: ${(top - ours).toFixed(2)} pp`,
+      );
+    } else {
+      console.log(`\n  CALA_TEAM_ID=${teamId} not found on this leaderboard snapshot (${enriched.length} row(s) with return %).`);
+    }
+  } else {
+    console.log(`\n  Set CALA_TEAM_ID to see your rank and gap vs #1.`);
+  }
 
   console.log(`\n${"═".repeat(72)}`);
   console.log(`  Rank  Return %   Team / id`);

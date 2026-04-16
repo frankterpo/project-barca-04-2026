@@ -1,4 +1,9 @@
-export { calaLeaderboardUrl, calaLeaderboardUrlCandidates, calaSubmitUrl } from "./convex-endpoints";
+export {
+  calaConvexQueryUrl,
+  calaLeaderboardUrl,
+  calaLeaderboardUrlCandidates,
+  calaSubmitUrl,
+} from "./convex-endpoints";
 export {
   fetchCalaLeaderboardRows,
   leaderboardRowReturnPct,

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 
+import { calaConvexQueryUrl } from "@/lib/cala";
+
 export const dynamic = "force-dynamic";
 
-const CONVEX_CLOUD_URL = "https://different-cormorant-663.convex.cloud/api/query";
 const INITIAL_INVESTMENT = 1_000_000;
 
 interface ConvexRow {
@@ -20,7 +21,7 @@ interface ConvexRow {
 
 async function fetchConvex(attempt = 0): Promise<{ ok: boolean; value?: unknown[]; error?: string }> {
   try {
-    const res = await fetch(CONVEX_CLOUD_URL, {
+    const res = await fetch(calaConvexQueryUrl(), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: "submissions:leaderboard", args: {} }),
