@@ -26,9 +26,17 @@ import {
 } from "../lib/cala";
 import { appendCalaRunLog } from "../lib/cala-run-log";
 import {
+  buildDualConcentration,
+  buildMaxConcentration,
   buildReturnProportional,
+  buildTopWeighted,
   buildTripleConcentration,
+  type CalaAllocationRow,
   type CalaPriceEntry,
+  priceEntriesToLookup,
+  projectedReturnPctFromValue,
+  projectedTerminalValueUsd,
+  validateAllocationsError,
 } from "../lib/cala-portfolio-math";
 import * as fs from "fs";
 import { join } from "path";
@@ -44,16 +52,31 @@ const PRICE_DB_PATH = "data/price-db.json";
 const CALA_DATA_DIR = join(process.cwd(), "data");
 
 /** Apr15→eval returns from price-harvester / Convex submit responses (optional). */
-function loadHarvestReturnMap(): Map<string, number> {
-  const m = new Map<string, number>();
+/** Full rows from `data/price-db.json` for allocation math (purchase + eval, not return % only). */
+function loadHarvestPriceDb(): Map<string, CalaPriceEntry> {
+  const m = new Map<string, CalaPriceEntry>();
   try {
     if (!fs.existsSync(PRICE_DB_PATH)) return m;
     const raw = JSON.parse(fs.readFileSync(PRICE_DB_PATH, "utf-8")) as {
-      prices?: Record<string, { returnPct?: number }>;
+      prices?: Record<string, Partial<CalaPriceEntry> & { ticker?: string }>;
     };
     if (!raw.prices) return m;
     for (const [ticker, row] of Object.entries(raw.prices)) {
-      if (typeof row?.returnPct === "number") m.set(ticker.toUpperCase(), row.returnPct);
+      const u = ticker.toUpperCase();
+      if (
+        row &&
+        typeof row.purchasePrice === "number" &&
+        typeof row.evalPrice === "number" &&
+        typeof row.returnPct === "number" &&
+        row.purchasePrice > 0
+      ) {
+        m.set(u, {
+          ticker: u,
+          purchasePrice: row.purchasePrice,
+          evalPrice: row.evalPrice,
+          returnPct: row.returnPct,
+        });
+      }
     }
   } catch {
     /* ignore corrupt price db */
@@ -725,30 +748,41 @@ function phase5_score(
 
 function phase6_allocate(
   scored: ScoredCompany[],
-  harvestReturns?: Map<string, number>,
+  harvestPrices?: Map<string, CalaPriceEntry>,
 ): { ticker: string; amount: number; reasoning: string }[] {
   console.log("\n═══ Phase 6: Portfolio Allocation ═══");
-
-  const projectedValueFromReturn = (amount: number, returnPct: number) =>
-    amount * (1 + returnPct / 100);
 
   const scoredByTicker = new Map(scored.map((c) => [c.ticker, c]));
 
   /** Prefer global price-db rankings so moonshots outside the entity-research universe still drive allocation. */
-  const harvestRowsFromMap = (map: Map<string, number>) =>
-    [...map.entries()]
-      .map(([ticker, returnPct]) => ({ ticker, returnPct }))
+  const harvestRowsFromMap = (map: Map<string, CalaPriceEntry>) =>
+    [...map.values()]
+      .map((e) => ({ ticker: e.ticker, returnPct: e.returnPct }))
       .sort((a, b) => b.returnPct - a.returnPct);
 
   const harvestRowsIntersectScored = () => {
-    if (!harvestReturns || harvestReturns.size === 0) return [];
+    if (!harvestPrices || harvestPrices.size === 0) return [];
     return scored
-      .map((company) => ({
-        ticker: company.ticker,
-        returnPct: harvestReturns.get(company.ticker),
-      }))
-      .filter((row): row is { ticker: string; returnPct: number } => typeof row.returnPct === "number")
+      .map((company) => {
+        const row = harvestPrices.get(company.ticker.toUpperCase());
+        return row ? { ticker: company.ticker, returnPct: row.returnPct } : null;
+      })
+      .filter((row): row is { ticker: string; returnPct: number } => row !== null)
       .sort((a, b) => b.returnPct - a.returnPct);
+  };
+
+  const rowToEntry = (r: { ticker: string; returnPct: number }): CalaPriceEntry => {
+    const u = r.ticker.toUpperCase();
+    const full = harvestPrices?.get(u);
+    if (full && full.purchasePrice > 0 && Number.isFinite(full.evalPrice)) {
+      return { ticker: u, purchasePrice: full.purchasePrice, evalPrice: full.evalPrice, returnPct: full.returnPct };
+    }
+    return {
+      ticker: u,
+      purchasePrice: 1,
+      evalPrice: 1 + r.returnPct / 100,
+      returnPct: r.returnPct,
+    };
   };
 
   const tryHarvestDrivenAlloc = (
@@ -757,8 +791,9 @@ function phase6_allocate(
   ): { ticker: string; amount: number; reasoning: string }[] | null => {
     if (rows.length < MIN_STOCKS) return null;
 
-    const top50 = rows.slice(0, MIN_STOCKS);
-    const discretionaryBudget = TOTAL_BUDGET - MIN_PER_STOCK * MIN_STOCKS;
+    const top50rows = rows.slice(0, MIN_STOCKS);
+    const entries: CalaPriceEntry[] = top50rows.map(rowToEntry);
+    const lookup = priceEntriesToLookup(entries);
 
     const reasoningFor = (ticker: string, returnPct: number, label: string) => {
       const company = scoredByTicker.get(ticker);
@@ -766,86 +801,56 @@ function phase6_allocate(
       return `[${label}] Harvested Apr15→today return ${returnPct.toFixed(1)}%. ${tail}`;
     };
 
-    const toAllocations = (amounts: number[], label: string) => {
-      const allocations = top50.map(({ ticker, returnPct }, idx) => ({
-        ticker,
-        amount: amounts[idx],
-        reasoning: reasoningFor(ticker, returnPct, label),
-      }));
-      const projectedValue = top50.reduce(
-        (sum, { returnPct }, idx) => sum + projectedValueFromReturn(allocations[idx].amount, returnPct),
-        0,
-      );
-      return { allocations, projectedValue };
-    };
-
-    const maxConcentrationBonus = Array.from({ length: MIN_STOCKS }, (_, idx) =>
-      idx === 0 ? discretionaryBudget : 0,
-    );
-    const maxAmounts = maxConcentrationBonus.map((b) => MIN_PER_STOCK + b);
-
-    const top0 = Math.max(0.01, top50[0].returnPct);
-    const top1 = Math.max(0.01, top50[1].returnPct);
-    const dualConcentrationBonus = Array.from({ length: MIN_STOCKS }, () => 0);
-    dualConcentrationBonus[0] = Math.floor(discretionaryBudget * (top0 / (top0 + top1)));
-    dualConcentrationBonus[1] = discretionaryBudget - dualConcentrationBonus[0];
-    const dualAmounts = dualConcentrationBonus.map((b) => MIN_PER_STOCK + b);
-
-    const top5WeightBonus = Array.from({ length: MIN_STOCKS }, () => 0);
-    const top5Returns = top50.slice(0, 5).map(({ returnPct }) => Math.max(0.01, returnPct));
-    const top5ReturnSum = top5Returns.reduce((sum, value) => sum + value, 0) || 1;
-    let allocated = 0;
-    for (let i = 0; i < top5Returns.length; i++) {
-      const add = Math.floor(discretionaryBudget * (top5Returns[i] / top5ReturnSum));
-      top5WeightBonus[i] = add;
-      allocated += add;
-    }
-    top5WeightBonus[0] += discretionaryBudget - allocated;
-    const top5Amounts = top5WeightBonus.map((b) => MIN_PER_STOCK + b);
-
-    const stubEntries: CalaPriceEntry[] = top50.map((r) => ({
-      ticker: r.ticker,
-      purchasePrice: 1,
-      evalPrice: 1,
-      returnPct: r.returnPct,
-    }));
-    const proportionalAllocs = buildReturnProportional(stubEntries);
-    const propAmounts = proportionalAllocs.map((a) => a.amount);
-    const tripleAllocs = buildTripleConcentration(stubEntries);
-    const tripleAmounts = tripleAllocs.map((a) => a.amount);
-
-    const candidates = [
-      toAllocations(maxAmounts, "max_concentrate"),
-      toAllocations(dualAmounts, "dual_concentrate"),
-      toAllocations(tripleAmounts, "triple_concentrate"),
-      toAllocations(top5Amounts, "top5_weighted"),
-      toAllocations(propAmounts, "return_proportional"),
+    const strategies: { name: string; allocs: CalaAllocationRow[] }[] = [
+      { name: "max_concentrate", allocs: buildMaxConcentration(entries) },
+      { name: "top_weighted", allocs: buildTopWeighted(entries) },
+      { name: "return_proportional", allocs: buildReturnProportional(entries) },
+      { name: "dual_concentrate", allocs: buildDualConcentration(entries) },
+      { name: "triple_concentrate", allocs: buildTripleConcentration(entries) },
     ];
 
-    const best = candidates.reduce((winner, candidate) =>
-      candidate.projectedValue > winner.projectedValue ? candidate : winner,
-    );
+    const valid = strategies.filter((s) => validateAllocationsError(s.allocs) === null);
+    if (valid.length === 0) {
+      console.error("  Harvest-driven: no valid allocation strategy");
+      return null;
+    }
 
+    const scoredStrategies = valid.map((s) => ({
+      name: s.name,
+      allocs: s.allocs,
+      projected: projectedTerminalValueUsd(s.allocs, lookup),
+    }));
+
+    const best = scoredStrategies.reduce((w, c) => (c.projected > w.projected ? c : w));
+
+    const retByTicker = new Map(top50rows.map((r) => [r.ticker.toUpperCase(), r.returnPct]));
+    const allocations = best.allocs.map((a) => ({
+      ticker: a.nasdaq_code,
+      amount: a.amount,
+      reasoning: reasoningFor(a.nasdaq_code, retByTicker.get(a.nasdaq_code.toUpperCase()) ?? 0, best.name),
+    }));
+
+    const projRet = projectedReturnPctFromValue(best.projected, TOTAL_BUDGET);
     console.log(
-      `  Harvest-driven mode (${sourceLabel}): ${top50.length} tickers, best candidate projected $${best.projectedValue.toLocaleString(undefined, {
+      `  Harvest-driven mode (${sourceLabel}): ${top50rows.length} tickers, best=${best.name} projected terminal $${best.projected.toLocaleString(undefined, {
         maximumFractionDigits: 0,
-      })}`,
+      })} (~${projRet >= 0 ? "+" : ""}${projRet.toFixed(1)}%)`,
     );
     console.log(
-      `  Top 5: ${best.allocations
+      `  Top 5: ${allocations
         .slice(0, 5)
         .map((a) => `${a.ticker}=$${a.amount.toLocaleString()}`)
         .join(", ")}`,
     );
-    return best.allocations;
+    return allocations;
   };
 
-  if (harvestReturns && harvestReturns.size >= MIN_STOCKS) {
-    const global = tryHarvestDrivenAlloc(harvestRowsFromMap(harvestReturns), "global price-db");
+  if (harvestPrices && harvestPrices.size >= MIN_STOCKS) {
+    const global = tryHarvestDrivenAlloc(harvestRowsFromMap(harvestPrices), "global price-db");
     if (global) return global;
   }
 
-  if (harvestReturns && harvestReturns.size > 0) {
+  if (harvestPrices && harvestPrices.size > 0) {
     const intersect = tryHarvestDrivenAlloc(harvestRowsIntersectScored(), "intersection with researched entities");
     if (intersect) return intersect;
   }
@@ -1033,8 +1038,8 @@ export async function runResearchPipeline(opts?: { submit?: boolean; version?: s
   );
 
   const scored = phase5_score(entities, financials, qualitative);
-  const harvestReturns = loadHarvestReturnMap();
-  const allocations = phase6_allocate(scored, harvestReturns);
+  const harvestPrices = loadHarvestPriceDb();
+  const allocations = phase6_allocate(scored, harvestPrices);
 
   let submissionResult = null;
   if (submit && allocations.length >= MIN_STOCKS) {

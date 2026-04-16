@@ -216,3 +216,41 @@ export function buildTripleConcentration(entries: CalaPriceEntry[]): CalaAllocat
   }
   return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
 }
+
+/** Lookup table keyed by upper-case ticker (matches `nasdaq_code` from builders). */
+export function priceEntriesToLookup(entries: CalaPriceEntry[]): Record<string, CalaPriceEntry> {
+  const out: Record<string, CalaPriceEntry> = {};
+  for (const e of entries) {
+    out[e.ticker.toUpperCase()] = e;
+  }
+  return out;
+}
+
+/**
+ * Ending portfolio value after Cala’s Apr-15 purchase and mark-to-market,
+ * using actual purchase and eval prices. Skips lines with missing or non-positive purchase price.
+ */
+export function projectedTerminalValueUsd(
+  allocs: CalaAllocationRow[],
+  priceByTicker: ReadonlyMap<string, CalaPriceEntry> | Record<string, CalaPriceEntry>,
+): number {
+  const get = (code: string): CalaPriceEntry | undefined => {
+    const u = code.toUpperCase();
+    if (priceByTicker instanceof Map) {
+      return priceByTicker.get(u) ?? priceByTicker.get(code);
+    }
+    const record = priceByTicker as Record<string, CalaPriceEntry>;
+    return record[u] ?? record[code];
+  };
+  let sum = 0;
+  for (const a of allocs) {
+    const p = get(a.nasdaq_code);
+    if (!p || !(p.purchasePrice > 0) || p.evalPrice == null || !Number.isFinite(p.evalPrice)) continue;
+    sum += (a.amount / p.purchasePrice) * p.evalPrice;
+  }
+  return sum;
+}
+
+export function projectedReturnPctFromValue(terminalValueUsd: number, budget = CALA_PORTFOLIO_TOTAL_BUDGET): number {
+  return ((terminalValueUsd - budget) / budget) * 100;
+}

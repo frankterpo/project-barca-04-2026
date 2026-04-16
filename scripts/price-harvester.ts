@@ -33,6 +33,8 @@ import {
   buildReturnProportional,
   buildTopWeighted,
   buildTripleConcentration,
+  priceEntriesToLookup,
+  projectedTerminalValueUsd,
   validateAllocationsError as validateAllocations,
 } from "@/lib/cala-portfolio-math";
 
@@ -46,6 +48,16 @@ import { join } from "path";
 function submitUrl(): string {
   return calaSubmitUrl();
 }
+
+function toNumOrNull(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 const FETCH_TIMEOUT_MS = Number(process.env.CALA_FETCH_TIMEOUT_MS ?? 120_000);
 const HARVEST_RETRY_LIMIT = 10;
 const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
@@ -797,6 +809,49 @@ const ALL_TICKERS = [
   "NBRV", "NEOS", "NVAX", "OCUP", "ONCT", "ORPH", "PRTA",
   "PTGX", "RLAY", "SBBP", "SENS", "SGMO", "SNGX", "TARS",
   "TTOO", "TXMD", "VBIV", "VRCA", "VTGN", "ZNTL",
+
+  // === WAVE 7: REVERSE SPLIT CANDIDATES (post Apr 15, 2025) ===
+  // High-ratio reverse splits that may yield unadjusted API returns
+  // 1:200 splits
+  "NXTT", "JTAI",
+  // 1:100+ splits
+  "ADTX", "CBIO", "AREB", "LBGJ", "ONCO",
+  // 1:30-50 splits
+  "WCT", "NUWE", "NVVE", "NITO", "YHC", "NVNO", "PAVM", "ABP", "OGEN",
+  // 1:20-25 splits
+  "ADV", "AGL", "ADIL", "WAI", "ACXP", "TC", "PED", "XHG", "NVDQ", "AMRN", "MRDN",
+  // Additional reverse split plays
+  "LDSN", "CISO", "COSM", "EDBL", "SBFM", "CNSP", "MGOL", "SMFL",
+  "TBLT", "GFAI", "IMPP", "KTTA", "AULT", "TKLF", "KORE", "HOUR",
+  "CEMI", "ATPC", "BTBT", "NCPL", "MITQ", "BSFC", "WHLM", "GPAK",
+  "CRGE", "AREC", "BASA", "INDO", "SNSE", "BENF", "CPTN", "TLSA",
+  "DRCT", "NVTS", "ATHE", "MLTX", "APRE", "ELMS", "CTCX", "EEIQ",
+
+  // === WAVE 7: OTC PINK SHEETS / EXTREME MOVERS (most won't work but worth trying) ===
+  "EHYD", "NECA", "STIXF", "BIORQ",
+
+  // === WAVE 7: IPO MOONSHOTS / SPAC de-SPAC plays ===
+  "MGRT", "SDM", "TDIC", "EDHL", "BAOS",
+  "BRLS", "GCT", "WIMI", "KUKE", "CANG", "GMAB",
+  "NUVB", "DM", "ASTR", "SPCE", "RKLB",
+  "LUNR", "RDW", "MNTS", "ASTS",
+
+  // === WAVE 7: POST-BANKRUPTCY MOONSHOTS ===
+  "WOLF",
+
+  // === WAVE 7: BIOTECH FDA APPROVALS / MERGERS ===
+  "HIMS", "CORT", "MDGL", "KRYS", "PCVX", "VERV",
+  "BMRN", "SRPT", "ALNY", "VKTX", "PTGX", "AKRO",
+  "RXRX", "AGIO", "TGTX", "ADMA", "JANX", "NUVL",
+
+  // === WAVE 7: AI / QUANTUM ULTRA-SMALL-CAP ===
+  "SOUN", "BBAI", "BSQR", "DTST", "INOD", "SYM",
+  "AEVA", "OUST", "INDI", "LIDR",
+
+  // === WAVE 7: CHINESE NANO-CAPs that moon ===
+  "JZ", "LITM", "NIO", "LI", "XPEV",
+  "CPOP", "AIXI", "NISN", "WISA", "CXDO",
+  "RCAT", "UMAC", "BRLT", "UTME", "EZGO",
 ];
 
 function dedup(tickers: string[]): string[] {
@@ -1190,13 +1245,9 @@ async function optimize(dryRun: boolean) {
     if (err) console.log(`\n  ⚠️  ${s.name} invalid: ${err}`);
   }
 
+  const priceLookup = priceEntriesToLookup(Object.values(db.prices));
   for (const s of strategies) {
-    const projectedValue = s.allocs.reduce((sum, a) => {
-      const p = db.prices[a.nasdaq_code];
-      if (!p) return sum;
-      const shares = a.amount / p.purchasePrice;
-      return sum + shares * p.evalPrice;
-    }, 0);
+    const projectedValue = projectedTerminalValueUsd(s.allocs, priceLookup);
     const projectedReturn = ((projectedValue - TOTAL_BUDGET) / TOTAL_BUDGET) * 100;
     console.log(`\n  ${s.name}:`);
     console.log(`    Projected: $${projectedValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} (${projectedReturn > 0 ? "+" : ""}${projectedReturn.toFixed(1)}%)`);
@@ -1209,12 +1260,7 @@ async function optimize(dryRun: boolean) {
     return;
   }
 
-  const projectedVal = (allocs: Allocation[]) =>
-    allocs.reduce((sum, a) => {
-      const p = db.prices[a.nasdaq_code];
-      if (!p) return sum;
-      return sum + (a.amount / p.purchasePrice) * p.evalPrice;
-    }, 0);
+  const projectedVal = (allocs: Allocation[]) => projectedTerminalValueUsd(allocs, priceLookup);
 
   const bestStrategy = validStrategies.reduce((best, s) =>
     projectedVal(s.allocs) > projectedVal(best.allocs) ? s : best,
@@ -1334,6 +1380,57 @@ async function optimize(dryRun: boolean) {
     actual_invested_usd: invested,
     price_db_count: entries.length,
   });
+
+  // Reconcile submit return vs leaderboard row (debug drift / timing)
+  try {
+    const board = await tryFetchCalaLeaderboardRows(FETCH_TIMEOUT_MS);
+    if (!board) {
+      console.log("   📋 Leaderboard reconcile: skipped (snapshot unavailable)");
+      appendCalaRunLog(DATA_DIR, {
+        phase: "optimize_submit_leaderboard_reconcile",
+        team_id: teamId,
+        submit_return_pct: ret,
+        leaderboard_return_pct: null,
+        drift_pp: null,
+        leaderboard_url: null,
+        note: "leaderboard unavailable",
+      });
+    } else {
+      const mineRow = board.rows.find((r) => String(r.team_id ?? r.team ?? "") === teamId);
+      const lbPct = mineRow ? leaderboardRowReturnPct(mineRow) : null;
+      const drift = lbPct != null ? ret - lbPct : null;
+      console.log(
+        `   📋 Submit vs leaderboard: submit=${ret.toFixed(2)}% | row=${lbPct != null ? lbPct.toFixed(2) : "n/a"}% | drift=${drift != null ? `${drift >= 0 ? "+" : ""}${drift.toFixed(2)}` : "n/a"} pp`,
+      );
+      appendCalaRunLog(DATA_DIR, {
+        phase: "optimize_submit_leaderboard_reconcile",
+        team_id: teamId,
+        submit_return_pct: ret,
+        leaderboard_return_pct: lbPct,
+        drift_pp: drift,
+        leaderboard_url: board.url,
+        leaderboard_row_snapshot: mineRow
+          ? {
+              return_pct: toNumOrNull(mineRow.return_pct),
+              total_value: toNumOrNull(mineRow.total_value),
+              total_invested: toNumOrNull(
+                mineRow.total_invested ?? mineRow.totalInvested,
+              ),
+            }
+          : null,
+        team_found_on_board: Boolean(mineRow),
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`   ⚠️  Leaderboard reconcile failed: ${msg}`);
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_submit_leaderboard_reconcile",
+      team_id: teamId,
+      submit_return_pct: ret,
+      error_message: msg,
+    });
+  }
 
   // Update prices from response
   const pp = (result.purchase_prices_apr15 ?? {}) as Record<string, number>;

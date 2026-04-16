@@ -57,10 +57,20 @@ async function fetchLeaderboardViaConvexQuery(
 }
 
 /** Normalize return % from a leaderboard row (supports return_pct or total_value vs $1M baseline). */
+function rowTotalInvested(row: Record<string, unknown>): number | null {
+  const a = row.total_invested;
+  const b = row.totalInvested;
+  if (typeof a === "number" && Number.isFinite(a)) return a;
+  if (typeof b === "number" && Number.isFinite(b)) return b;
+  return null;
+}
+
 export function leaderboardRowReturnPct(row: Record<string, unknown>): number | null {
-  if (typeof row.return_pct === "number") return row.return_pct;
-  if (typeof row.total_value === "number") {
-    return ((row.total_value as number) - 1_000_000) / 1_000_000 * 100;
+  if (typeof row.return_pct === "number" && Number.isFinite(row.return_pct)) return row.return_pct;
+  if (typeof row.total_value === "number" && Number.isFinite(row.total_value)) {
+    const invested = rowTotalInvested(row) ?? INITIAL_INVESTMENT;
+    if (invested === 0) return null;
+    return (((row.total_value as number) - invested) / invested) * 100;
   }
   return null;
 }
@@ -83,19 +93,32 @@ function isLeaderboardArray(data: unknown): data is Record<string, unknown>[] {
   return rowLooksLikeLeaderboard(row as Record<string, unknown>);
 }
 
+function extractRowsFromKeyedArray(
+  o: Record<string, unknown>,
+  key: string,
+): Record<string, unknown>[] | null {
+  const arr = o[key];
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  const first = arr[0];
+  if (typeof first !== "object" || first === null) return null;
+  if (!rowLooksLikeLeaderboard(first as Record<string, unknown>)) return null;
+  return arr as Record<string, unknown>[];
+}
+
 /**
- * Accept a raw array, or Next `/api/leaderboard` shape `{ ok?, rows }`, or any object with `rows` array.
+ * Accept a raw array, or `{ rows }` / `{ ok?, rows }`, or Convex-style `{ value: [...] }`, or `{ page: [...] }`.
  */
-function extractLeaderboardRowsFromJson(data: unknown): Record<string, unknown>[] | null {
+export function extractLeaderboardRowsFromJson(data: unknown): Record<string, unknown>[] | null {
   if (isLeaderboardArray(data)) return data;
   if (typeof data !== "object" || data === null) return null;
   const o = data as Record<string, unknown>;
-  const rows = o.rows;
-  if (!Array.isArray(rows) || rows.length === 0) return null;
-  const first = rows[0];
-  if (typeof first !== "object" || first === null) return null;
-  if (!rowLooksLikeLeaderboard(first as Record<string, unknown>)) return null;
-  return rows as Record<string, unknown>[];
+  const fromRows = extractRowsFromKeyedArray(o, "rows");
+  if (fromRows) return fromRows;
+  const fromValue = extractRowsFromKeyedArray(o, "value");
+  if (fromValue) return fromValue;
+  const fromPage = extractRowsFromKeyedArray(o, "page");
+  if (fromPage) return fromPage;
+  return null;
 }
 
 /** Throws with a per-URL error trail if nothing works. */

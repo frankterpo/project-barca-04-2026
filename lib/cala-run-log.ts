@@ -12,6 +12,7 @@ export type CalaRunPhase =
   | "optimize_submit"
   | "optimize_submit_blocked"
   | "optimize_submit_failed"
+  | "optimize_submit_leaderboard_reconcile"
   | "leaderboard"
   | "research_submit"
   | "research_submit_failed";
@@ -40,6 +41,17 @@ export interface CalaRunLogEntry {
   harvest_elapsed_s?: number;
   /** Convex / HTTP error text (optimize/research failures) */
   error_message?: string;
+  /** After optimize_submit: row return % from fetched leaderboard vs submit_return_pct */
+  leaderboard_return_pct?: number | null;
+  drift_pp?: number | null;
+  leaderboard_url?: string | null;
+  note?: string;
+  team_found_on_board?: boolean;
+  leaderboard_row_snapshot?: {
+    return_pct?: number | null;
+    total_value?: number | null;
+    total_invested?: number | null;
+  } | null;
 }
 
 export function calaRunLoggingEnabled(): boolean {

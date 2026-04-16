@@ -25,3 +25,10 @@ Key routing rules:
 
 - typecheck: pnpm tsc --noEmit
 - lint: pnpm lint
+- unit tests: pnpm test (Vitest, `**/*.test.ts`)
+
+## Testing
+
+- Run `pnpm test` from repo root.
+- Add tests next to modules (e.g. `lib/cala/*.test.ts`).
+- When fixing Cala leaderboard or submit drift, extend `leaderboard-fetch.test.ts` or harvester logs.

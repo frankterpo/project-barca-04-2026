@@ -17,6 +17,15 @@ export function JudgeModeClient({
   const [holdings, setHoldings] = useState<Holding[]>(initialHoldings);
   const [loadingHoldings, setLoadingHoldings] = useState(initialHoldings.length === 0);
 
+  const defaultTicker =
+    (initialTicker &&
+      holdings.some((h) => h.ticker === initialTicker.toUpperCase()) &&
+      initialTicker.toUpperCase()) ||
+    holdings[0]?.ticker ||
+    "";
+
+  const [ticker, setTicker] = useState(defaultTicker);
+
   useEffect(() => {
     if (initialHoldings.length > 0) return;
 
@@ -25,7 +34,11 @@ export function JudgeModeClient({
       .then((r) => r.json() as Promise<{ holdings?: Holding[] }>)
       .then((body) => {
         if (!ctrl.signal.aborted && body.holdings) {
-          startTransition(() => setHoldings(body.holdings!));
+          const next = body.holdings!;
+          startTransition(() => {
+            setHoldings(next);
+            setTicker((t) => t || next[0]?.ticker || "");
+          });
         }
       })
       .catch(() => {})
@@ -35,24 +48,9 @@ export function JudgeModeClient({
 
     return () => ctrl.abort();
   }, [initialHoldings]);
-
-  const defaultTicker =
-    (initialTicker &&
-      holdings.some((h) => h.ticker === initialTicker.toUpperCase()) &&
-      initialTicker.toUpperCase()) ||
-    holdings[0]?.ticker ||
-    "";
-
-  const [ticker, setTicker] = useState(defaultTicker);
   const [presetId, setPresetId] = useState<number | null>(1);
   const [answer, setAnswer] = useState<JudgeAnswer | null>(null);
   const [loading, setLoading] = useState(false);
-
-  useEffect(() => {
-    if (holdings.length > 0 && !ticker) {
-      setTicker(holdings[0].ticker);
-    }
-  }, [holdings, ticker]);
 
   const fetchAnswer = useCallback(() => {
     if (!ticker || !presetId) return;

@@ -5,6 +5,7 @@ export {
   calaSubmitUrl,
 } from "./convex-endpoints";
 export {
+  extractLeaderboardRowsFromJson,
   fetchCalaLeaderboardRows,
   leaderboardRowReturnPct,
   tryFetchCalaLeaderboardRows,
