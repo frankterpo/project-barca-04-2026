@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.1] - 2026-04-16
+
+### Added
+
+- Northflank operator docs and `scripts/trigger-research-job.ts` with `pnpm agent:run-remote`
+- `lib/graph/omnigraph-run-data.ts` and API routes preferring Omnigraph with JSON fallback
+- Supabase migrations and API routes for prices and runs; Cala portfolio math and ticker universe helpers
+- Graph queries extensions in `graph/queries.gq`
+
+### Changed
+
+- Research agent, price harvester, Judge Mode, and trading dashboard consolidated flows
+- Docs: `docs/OPERATOR.md`, `.env.example` Northflank and Omnigraph variables
+
 ## [Unreleased]
 
 ### Cala / Convex
