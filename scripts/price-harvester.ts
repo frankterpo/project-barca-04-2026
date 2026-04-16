@@ -766,6 +766,10 @@ const ALL_TICKERS = [
   // Defense / drone new entries
   "AVAV", "KTOS", "RCAT", "SPCE", "MNTS",
   "ORBT", "IRDM", "GSAT", "GILT",
+
+  // === WAVE 5: Extra nano-cap / clinical-stage probes (competitor sweep) ===
+  "RANI", "CGTX", "IMNN", "KNSA", "SLRX", "ALLR", "ABVE", "HOWL",
+  "TCRX", "MIRA", "FDMT", "PHVS",
 ];
 
 function dedup(tickers: string[]): string[] {
@@ -1234,6 +1238,13 @@ async function optimize(dryRun: boolean) {
     return;
   }
 
+  if (process.env.CALA_ALLOW_SUBMIT !== "1") {
+    console.error(
+      "   ❌ Live optimize submit blocked — set CALA_ALLOW_SUBMIT=1 after operator approval, or use --dry-run.",
+    );
+    return;
+  }
+
   const teamId = process.env.CALA_TEAM_ID?.trim();
   if (!teamId) throw new Error("CALA_TEAM_ID required");
 
@@ -1562,7 +1573,9 @@ async function main() {
     console.log("  --show       Show cached rankings");
     console.log("  --leaderboard  Print live scoreboard (sorted by return)");
     console.log("  --auto       Continuous loop: harvest → optimize → repeat");
-    console.log("  Env: CALA_LEADERBOARD_URL (+ auto /api/leaderboard on that host), CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL origin");
+    console.log(
+      "  Env: CALA_LEADERBOARD_URL (+ auto /api/leaderboard on that host), CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL origin; CALA_ALLOW_SUBMIT=1 for live --optimize POST",
+    );
   }
 }
 
