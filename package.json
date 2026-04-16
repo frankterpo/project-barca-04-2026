@@ -14,7 +14,8 @@
     "agent:research": "tsx scripts/research-agent.ts",
     "agent:submit": "tsx scripts/submit-portfolio.ts",
     "agent:run": "tsx scripts/autonomous-runner.ts --once",
-    "agent:loop": "tsx scripts/autonomous-runner.ts"
+    "agent:loop": "tsx scripts/autonomous-runner.ts",
+    "agent:run-remote": "tsx scripts/trigger-research-job.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",

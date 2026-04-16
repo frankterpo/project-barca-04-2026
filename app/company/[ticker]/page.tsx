@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { CommitteeStrip } from "@/components/company/committee-strip";
 import { ThesisTabs } from "@/components/company/thesis-tabs";
+import { loadCompanyDecisionFromOmnigraph } from "@/lib/graph/omnigraph-run-data";
 import { getDefaultRunId } from "@/lib/run-id";
 import { createJsonStore } from "@/lib/store/json-store";
 
@@ -12,9 +13,10 @@ interface Props {
 
 export default async function CompanyPage({ params }: Props) {
   const { ticker } = await params;
-  const store = createJsonStore();
   const runId = getDefaultRunId();
-  const decision = await store.getDecision(runId, ticker);
+  const fromGraph = await loadCompanyDecisionFromOmnigraph(runId, ticker);
+  const decision =
+    fromGraph ?? (await createJsonStore().getDecision(runId, ticker));
   if (!decision) notFound();
 
   return (

@@ -68,6 +68,8 @@ Request body for read/change: `{ "query": "<name>", "params": { ... }, "branch":
 
 **Northflank (M4):** set `NORTHFLANK_API_KEY` in `.env`. The key authenticates against the Northflank v1 API (`https://api.northflank.com`). Jobs must already exist on Northflank — the client triggers runs, polls status, and lists history.
 
+**Omnigraph on Northflank:** see `northflank/README.md` for a service + job layout (persistent volume, `OMNIGRAPH_SERVER_BEARER_TOKEN`, internal URL). Trigger the packaged research agent with `pnpm agent:run-remote` after setting `NORTHFLANK_PROJECT_ID` and `NORTHFLANK_RESEARCH_JOB_ID`.
+
 Compute API routes:
 
 | Route                 | Method | Purpose                                 |
