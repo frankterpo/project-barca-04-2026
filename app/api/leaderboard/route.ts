@@ -1,10 +1,31 @@
 import { NextResponse } from "next/server";
 import { tryFetchCalaLeaderboardRows, leaderboardRowReturnPct } from "@/lib/cala";
+import { parseLenientJson } from "@/lib/cala/convex-http";
 
 export const dynamic = "force-dynamic";
 
+const DIRECT_CONVEX_URL = "https://different-cormorant-663.convex.site/api/leaderboard";
+
 export async function GET() {
-  const result = await tryFetchCalaLeaderboardRows(8_000);
+  let result = await tryFetchCalaLeaderboardRows(8_000);
+
+  if (!result) {
+    try {
+      const res = await fetch(DIRECT_CONVEX_URL, {
+        headers: { Accept: "application/json" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(8_000),
+      });
+      const text = await res.text();
+      const data = parseLenientJson(text) as Record<string, unknown>[];
+      if (Array.isArray(data) && data.length > 0) {
+        result = { url: DIRECT_CONVEX_URL, rows: data };
+      }
+    } catch {
+      // fallback failed
+    }
+  }
+
   if (!result) {
     return NextResponse.json({ ok: false, rows: [], error: "Leaderboard unreachable" }, { status: 502 });
   }

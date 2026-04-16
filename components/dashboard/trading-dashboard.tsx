@@ -152,6 +152,50 @@ export function TradingDashboard() {
     );
   }
 
+  if (error && rows.length === 0) {
+    return (
+      <div className="space-y-6">
+        <div className="rounded-xl border border-warning/30 bg-warning/5 p-6 text-center">
+          <p className="text-sm text-warning font-medium">Leaderboard temporarily unavailable</p>
+          <p className="mt-1 text-xs text-text-muted">{error}</p>
+          <button type="button" onClick={fetchLeaderboard} className="mt-3 text-xs text-accent hover:underline">
+            Retry
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={fireHarvest}
+          disabled={harvest === "running"}
+          className="group relative w-full rounded-xl border border-accent/40 bg-accent/5 hover:bg-accent/10 hover:border-accent/60 px-6 py-5 text-left transition-all cursor-pointer"
+        >
+          <div className="flex items-center gap-3">
+            <svg className="h-6 w-6 text-accent group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <div>
+              <div className="text-sm font-semibold text-text-primary">Fire Harvest</div>
+              <div className="text-xs text-text-secondary">Run price-harvester.ts to scan, optimize & submit to Cala</div>
+            </div>
+          </div>
+        </button>
+
+        {harvestLog.length > 0 && (
+          <div className="rounded-xl border border-border-subtle bg-bg-elevated overflow-hidden">
+            <div className="flex items-center justify-between border-b border-border-subtle bg-bg-muted/40 px-4 py-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-text-muted">Harvest Log</span>
+            </div>
+            <div ref={logRef} className="max-h-48 overflow-y-auto p-3 font-mono text-xs text-text-secondary leading-relaxed">
+              {harvestLog.map((line, i) => (
+                <div key={i}>{line}</div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       {/* Hero stats */}
