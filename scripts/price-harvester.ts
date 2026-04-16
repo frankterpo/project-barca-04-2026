@@ -18,11 +18,10 @@ import {
   fetchConvexEndpointJson,
   leaderboardRowReturnPct,
   tryFetchCalaLeaderboardRows,
-} from "../lib/cala";
-import { getOmnigraphClient, probeOmnigraphHealth } from "../lib/omnigraph/client";
-import { readFileSync, writeFileSync, existsSync } from "fs";
-import { dirname, join } from "path";
-import { fileURLToPath } from "url";
+} from "@/lib/cala";
+import { getOmnigraphClient, probeOmnigraphHealth } from "@/lib/omnigraph/client";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "fs";
+import { join } from "path";
 
 function submitUrl(): string {
   return calaSubmitUrl();
@@ -36,9 +35,24 @@ const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
 
 const CONCURRENCY = Number(process.env.CALA_HARVEST_CONCURRENCY ?? 5);
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const PRICE_DB_PATH = join(SCRIPT_DIR, "../data/price-db.json");
-const BAD_TICKERS_PATH = join(SCRIPT_DIR, "../data/bad-tickers.json");
+function resolveDataDir(): string {
+  const bundled = join(process.cwd(), "data");
+  if (process.env.VERCEL) {
+    const tmp = "/tmp/data";
+    if (!existsSync(tmp)) mkdirSync(tmp, { recursive: true });
+    for (const f of ["price-db.json", "bad-tickers.json"]) {
+      const src = join(bundled, f);
+      const dst = join(tmp, f);
+      if (!existsSync(dst) && existsSync(src)) copyFileSync(src, dst);
+    }
+    return tmp;
+  }
+  return bundled;
+}
+
+const DATA_DIR = resolveDataDir();
+const PRICE_DB_PATH = join(DATA_DIR, "price-db.json");
+const BAD_TICKERS_PATH = join(DATA_DIR, "bad-tickers.json");
 
 interface PriceEntry {
   ticker: string;
@@ -1136,7 +1150,7 @@ async function optimize(dryRun: boolean) {
 
   if (entries.length < MIN_STOCKS) {
     console.error(`Need at least ${MIN_STOCKS} prices, have ${entries.length}. Run --harvest first.`);
-    process.exit(1);
+    return;
   }
 
   showRankings(db);
@@ -1498,7 +1512,16 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error("Fatal:", err);
-  process.exit(1);
-});
+export { harvest, optimize, autoLoop, loadPriceDB, showRankings };
+
+const isCli =
+  typeof process !== "undefined" &&
+  process.argv[1] &&
+  (process.argv[1].includes("price-harvester") || process.argv[1].includes("tsx"));
+
+if (isCli) {
+  main().catch(err => {
+    console.error("Fatal:", err);
+    process.exit(1);
+  });
+}

@@ -126,7 +126,7 @@ export function TradingDashboard() {
         const rows = json.rows as TeamRow[];
         setTotalTeams(rows.length);
         const idx = rows.findIndex(
-          (r) => r.team_name?.toLowerCase().includes("nuke") || (r as Record<string, unknown>).team_id?.toString().toLowerCase().includes("nuke"),
+          (r) => r.team_name?.toLowerCase().includes("nuke") || (r as unknown as Record<string, unknown>).team_id?.toString().toLowerCase().includes("nuke"),
         );
         if (idx >= 0) {
           setTeam(rows[idx]);
