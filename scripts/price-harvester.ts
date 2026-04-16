@@ -76,7 +76,7 @@ function normSym(t: string): string {
 }
 
 const FETCH_TIMEOUT_MS = Number(process.env.CALA_FETCH_TIMEOUT_MS ?? 120_000);
-const HARVEST_RETRY_LIMIT = 10;
+const HARVEST_RETRY_LIMIT = 28;
 const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
 
 const CONCURRENCY = Number(process.env.CALA_HARVEST_CONCURRENCY ?? 5);
@@ -159,7 +159,9 @@ function savePersistedBadTickers(tickers: Set<string>) {
       return [n, { ...e, ticker: n }] as const;
     }),
   );
-  const merged: BadTickerEntry[] = dedup([...tickers]).map((n) => existing.get(n) ?? { ticker: n, failedAt: now });
+  const merged: BadTickerEntry[] = dedup([...tickers].map(normSym)).map(
+    (n) => existing.get(n) ?? { ticker: n, failedAt: now },
+  );
   badTickerEntries = merged;
   serializeBadTickerFile(BAD_TICKERS_PATH, merged);
   void import("@/lib/cala-supabase-sync").then((m) =>
@@ -1037,14 +1039,17 @@ function discoverHarvestUniverse(): string[] {
 const HARVEST_UNIVERSE = discoverHarvestUniverse();
 const UNIVERSE_RAW_INVALID_FORMAT = splitHarvestUniverse(ALL_TICKERS).invalidFormat.length;
 
+/** Uppercase unique tickers (Cala keys / bad-ticker Set must match). */
 function dedup(tickers: string[]): string[] {
   const seen = new Set<string>();
-  return tickers.filter(t => {
-    const upper = t.toUpperCase();
-    if (seen.has(upper)) return false;
-    seen.add(upper);
-    return true;
-  });
+  const out: string[] = [];
+  for (const t of tickers) {
+    const u = normSym(t);
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
 }
 
 /**
@@ -1099,7 +1104,7 @@ const badTickers = new Set<string>([
 ]);
 
 function harvestReplacementCandidates(db: PriceDB, universeOrder: string[]): string[] {
-  const u = dedup(universeOrder).filter(t => !badTickers.has(t));
+  const u = dedup(universeOrder).filter(t => !badTickers.has(normSym(t)));
   const pending = u.filter(t => !db.prices[t]);
   const cached = u.filter(t => db.prices[t])
     .sort((a, b) => (db.prices[a].returnPct ?? 0) - (db.prices[b].returnPct ?? 0));
@@ -1114,7 +1119,8 @@ function chunkInto50(tickers: string[]): string[][] {
     if (chunk.length === 50) {
       chunks.push(chunk);
     } else if (chunk.length > 0) {
-      const padding = unique.filter(t => !chunk.includes(t)).slice(0, 50 - chunk.length);
+      const inChunk = new Set(chunk.map(normSym));
+      const padding = unique.filter(t => !inChunk.has(normSym(t))).slice(0, 50 - chunk.length);
       chunks.push([...chunk, ...padding]);
     }
   }
@@ -1127,7 +1133,7 @@ function chunkInto50(tickers: string[]): string[][] {
  */
 function buildHarvestBatches(tickers: string[], db: PriceDB): string[][] {
   const universeOrder = dedup(tickers);
-  const unique = universeOrder.filter(t => !badTickers.has(t));
+  const unique = universeOrder.filter(t => !badTickers.has(normSym(t)));
   const pending = sortPendingForHarvest(
     unique.filter(t => !db.prices[t]),
     universeOrder,
@@ -1140,15 +1146,14 @@ function buildHarvestBatches(tickers: string[], db: PriceDB): string[][] {
 }
 
 function extractBadTicker(errorStr: string): string | null {
-  const up = (s: string) => s.toUpperCase();
   const m0 = errorStr.match(/(\w+): No closing price found/i);
-  if (m0) return up(m0[1]);
+  if (m0) return normSym(m0[1]);
   const m = errorStr.match(/(\w+): Failed to fetch historical price/);
-  if (m) return up(m[1]);
+  if (m) return normSym(m[1]);
   const m2 = errorStr.match(/Price fetch failed.*?(\b[A-Z]{1,5}\b): Failed/);
-  if (m2) return m2[1];
+  if (m2) return normSym(m2[1]);
   const m3 = errorStr.match(/Missing price data for (\w+)/i);
-  if (m3) return up(m3[1]);
+  if (m3) return normSym(m3[1]);
   return null;
 }
 
@@ -1161,7 +1166,15 @@ function extractAllBadTickers(detail: string): string[] {
   }
   const whole = extractBadTicker(detail);
   if (whole) seen.add(whole);
-  return [...seen];
+  // Compound errors: "PICS: Failed ...; APC: Failed ..." — also catch every Ticker: Failed... in one string.
+  for (const m of detail.matchAll(/\b([A-Za-z]{1,5}):\s*Failed to fetch historical price/gi)) {
+    seen.add(normSym(m[1]));
+  }
+  for (const m of detail.matchAll(/\b([A-Za-z]{1,5}):\s*No closing price found/gi)) {
+    seen.add(normSym(m[1]));
+  }
+  const noise = new Set(["HTTP", "JSON"]);
+  return [...seen].filter(s => /^[A-Z]{1,5}$/.test(s) && !noise.has(s));
 }
 
 function logAllocationAudit(audit: PortfolioAudit) {
@@ -1180,7 +1193,7 @@ async function submitAndHarvest(
   db: PriceDB,
   retryCount = 0,
 ): Promise<number> {
-  const validTickers = tickers.filter(t => !badTickers.has(t));
+  const validTickers = tickers.filter(t => !badTickers.has(normSym(t)));
   if (validTickers.length < MIN_STOCKS) {
     console.error(`   ❌ Not enough valid tickers (${validTickers.length})`);
     return 0;
@@ -1239,13 +1252,18 @@ async function submitAndHarvest(
     const bads = extractAllBadTickers(String(detail));
     if (bads.length > 0 && retryCount < HARVEST_RETRY_LIMIT) {
       console.log(`   ⚠️  Bad ticker(s): ${bads.join(", ")} — removing and retrying`);
-      for (const b of bads) badTickers.add(b);
+      for (const b of bads) badTickers.add(normSym(b));
       savePersistedBadTickers(badTickers);
-      const newTickers = use.filter(t => !bads.includes(t));
+      const badSet = new Set(bads.map(normSym));
+      const newTickers = use.filter(t => !badSet.has(normSym(t)));
       while (newTickers.length < MIN_STOCKS) {
-        const replacement = harvestReplacementCandidates(db, HARVEST_UNIVERSE).find(t => !newTickers.includes(t));
+        const have = new Set(newTickers.map(normSym));
+        const replacement = harvestReplacementCandidates(db, HARVEST_UNIVERSE).find(
+          t => !have.has(normSym(t)),
+        );
         if (!replacement) break;
         newTickers.push(replacement);
+        have.add(normSym(replacement));
       }
       if (newTickers.length < MIN_STOCKS) {
         console.error(
@@ -1271,7 +1289,7 @@ async function harvest() {
   const db = loadPriceDB();
   maybeWarnStalePriceDb(db);
   const unique = HARVEST_UNIVERSE;
-  const pending = unique.filter(t => !db.prices[t] && !badTickers.has(t));
+  const pending = unique.filter(t => !db.prices[normSym(t)] && !badTickers.has(normSym(t)));
   let chunks = buildHarvestBatches(HARVEST_UNIVERSE, db);
   const maxBatches = Number(process.env.CALA_HARVEST_MAX_BATCHES ?? "0");
   if (maxBatches > 0 && chunks.length > maxBatches) {
@@ -1322,7 +1340,9 @@ async function harvest() {
     const results = await Promise.allSettled(
       wave.map(async (chunk, j) => {
         const idx = waveIdx[j];
-        const unknownInBatch = chunk.filter(t => !db.prices[t] && !badTickers.has(t));
+        const unknownInBatch = chunk.filter(
+          t => !db.prices[normSym(t)] && !badTickers.has(normSym(t)),
+        );
         console.log(`   [${idx}] ${unknownInBatch.length} new tickers (+ padding to 50)`);
         await new Promise(r => setTimeout(r, j * 500));
         return submitAndHarvest(chunk, `harvest_${idx}`, db);
@@ -1532,16 +1552,18 @@ async function optimize(dryRun: boolean) {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error(`   ❌ Failed: ${msg}`);
-      const rejected = extractBadTicker(msg);
-      if (rejected && attempt < 5) {
-        console.log(`   🔄 Skipping rejected ticker "${rejected}" and retrying...`);
-        badTickers.add(rejected);
+      const rejectedAll = extractAllBadTickers(msg);
+      if (rejectedAll.length > 0 && attempt < 5) {
+        console.log(`   🔄 Skipping rejected ticker(s) "${rejectedAll.join(", ")}" and retrying...`);
+        for (const r of rejectedAll) badTickers.add(normSym(r));
         savePersistedBadTickers(badTickers);
         const cleaned = Object.values(db.prices)
-          .filter(e => !badTickers.has(e.ticker))
+          .filter(e => !badTickers.has(normSym(e.ticker)))
           .sort((a, b) => b.returnPct - a.returnPct);
         if (cleaned.length < MIN_STOCKS) {
-          console.error(`   ❌ Not enough valid tickers after removing ${rejected}`);
+          console.error(
+            `   ❌ Not enough valid tickers after removing ${rejectedAll.join(", ")}`,
+          );
           return null;
         }
         const newAllocs = allocationsForStrategy(stratName, cleaned);
@@ -1847,8 +1869,9 @@ async function main() {
     } else {
       console.log(`♻️  Re-enabling ${retryable.length} bad ticker(s) for retry (failed >${hours}h ago):`);
       console.log(`   ${retryable.join(", ")}`);
-      for (const t of retryable) badTickers.delete(t);
-      badTickerEntries = badTickerEntries.filter((e) => !retryable.includes(e.ticker));
+      const retrySet = new Set(retryable.map(normSym));
+      for (const t of retrySet) badTickers.delete(t);
+      badTickerEntries = badTickerEntries.filter((e) => !retrySet.has(normSym(e.ticker)));
       serializeBadTickerFile(BAD_TICKERS_PATH, badTickerEntries);
     }
     if (!args.includes("--harvest")) return;
