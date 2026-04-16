@@ -35,6 +35,10 @@ export interface CalaRunLogEntry {
   gap_to_first_pp?: number | null;
   top_return_pct?: number | null;
   our_return_pct?: number | null;
+  /** e.g. leaderboard team slug for the benchmark row */
+  benchmark_team_id?: string | null;
+  benchmark_return_pct?: number | null;
+  gap_to_benchmark_pp?: number | null;
   bad_ticker_count?: number;
   price_db_count?: number;
   harvest_new_prices?: number;

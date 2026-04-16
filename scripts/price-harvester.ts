@@ -17,6 +17,8 @@ import {
   fetchCalaLeaderboardRows,
   fetchConvexEndpointJson,
   leaderboardRowReturnPct,
+  leaderboardRowTeamId,
+  summarizeLeaderboardForTeam,
   tryFetchCalaLeaderboardRows,
 } from "@/lib/cala";
 import { appendCalaRunLog } from "@/lib/cala-run-log";
@@ -37,6 +39,12 @@ import {
   projectedTerminalValueUsd,
   validateAllocationsError as validateAllocations,
 } from "@/lib/cala-portfolio-math";
+import {
+  buildHarvestUniverse,
+  loadHarvestCandidateFiles,
+  priceDbAgeHours,
+  splitHarvestUniverse,
+} from "@/lib/cala-ticker-universe";
 
 type Allocation = CalaAllocationRow;
 type PriceEntry = CalaPriceEntry;
@@ -1071,6 +1079,13 @@ async function submitAndHarvest(
       }
       return submitAndHarvest(newTickers.slice(0, MIN_STOCKS), batchLabel, db, retryCount + 1);
     }
+    const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|abort/i.test(detail);
+    if (isNetworkError && retryCount < 3) {
+      const backoff = (retryCount + 1) * 2000;
+      console.log(`   ⚠️  Network error, retrying in ${backoff / 1000}s... (${detail.slice(0, 80)})`);
+      await new Promise(r => setTimeout(r, backoff));
+      return submitAndHarvest(tickers, batchLabel, db, retryCount + 1);
+    }
     console.error(`   ❌ Failed: ${String(detail).slice(0, 200)}`);
     return 0;
   }
@@ -1348,6 +1363,13 @@ async function optimize(dryRun: boolean) {
         if (err) { console.error(`   ❌ Rebuild failed: ${err}`); return null; }
         return trySubmit(newAllocs, stratName, attempt + 1);
       }
+      const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|abort/i.test(msg);
+      if (isNetworkError && attempt < 4) {
+        const backoff = attempt * 2000;
+        console.log(`   ⚠️  Network error, retrying in ${backoff / 1000}s...`);
+        await new Promise(r => setTimeout(r, backoff));
+        return trySubmit(allocs, stratName, attempt + 1);
+      }
       return null;
     }
   }
@@ -1396,12 +1418,22 @@ async function optimize(dryRun: boolean) {
         note: "leaderboard unavailable",
       });
     } else {
-      const mineRow = board.rows.find((r) => String(r.team_id ?? r.team ?? "") === teamId);
+      const mineRow = board.rows.find((r) => leaderboardRowTeamId(r) === teamId);
       const lbPct = mineRow ? leaderboardRowReturnPct(mineRow) : null;
       const drift = lbPct != null ? ret - lbPct : null;
+      const benchSlug =
+        process.env.CALA_BENCHMARK_TEAM_ID?.trim().toLowerCase() || "sourish";
+      const summary = summarizeLeaderboardForTeam(board.rows, teamId, {
+        benchmarkTeamId: benchSlug,
+      });
       console.log(
         `   📋 Submit vs leaderboard: submit=${ret.toFixed(2)}% | row=${lbPct != null ? lbPct.toFixed(2) : "n/a"}% | drift=${drift != null ? `${drift >= 0 ? "+" : ""}${drift.toFixed(2)}` : "n/a"} pp`,
       );
+      if (summary.ourRank != null && summary.topReturnPct != null) {
+        console.log(
+          `   📋 Board rank: ${summary.ourRank} / ${summary.enriched.length} | gap vs #1: ${summary.gapToFirstPp?.toFixed(2) ?? "n/a"} pp | vs ${benchSlug}: ${summary.gapToBenchmarkPp?.toFixed(2) ?? "n/a"} pp`,
+        );
+      }
       appendCalaRunLog(DATA_DIR, {
         phase: "optimize_submit_leaderboard_reconcile",
         team_id: teamId,
@@ -1409,6 +1441,14 @@ async function optimize(dryRun: boolean) {
         leaderboard_return_pct: lbPct,
         drift_pp: drift,
         leaderboard_url: board.url,
+        rank: summary.ourRank,
+        our_return_pct: summary.ourReturnPct,
+        top_return_pct: summary.topReturnPct,
+        gap_to_first_pp: summary.gapToFirstPp,
+        benchmark_team_id: summary.benchmarkTeamId,
+        benchmark_return_pct: summary.benchmarkReturnPct,
+        gap_to_benchmark_pp: summary.gapToBenchmarkPp,
+        leaderboard_rows: summary.enriched.length,
         leaderboard_row_snapshot: mineRow
           ? {
               return_pct: toNumOrNull(mineRow.return_pct),
@@ -1512,16 +1552,12 @@ async function fetchTopScore(): Promise<number | null> {
   return best;
 }
 
-function rowReturnPct(row: Record<string, unknown>): number | null {
-  return leaderboardRowReturnPct(row);
-}
-
 async function fetchMyBest(): Promise<number> {
   const teamId = process.env.CALA_TEAM_ID?.trim();
   if (!teamId) return 0;
   const got = await tryFetchCalaLeaderboardRows(FETCH_TIMEOUT_MS);
   if (!got) return 0;
-  const mine = got.rows.find(e => e.team_id === teamId);
+  const mine = got.rows.find((e) => leaderboardRowTeamId(e) === teamId);
   if (!mine) return 0;
   return leaderboardRowReturnPct(mine) ?? 0;
 }
@@ -1547,18 +1583,17 @@ async function printLeaderboardCli() {
     return;
   }
   const teamId = process.env.CALA_TEAM_ID?.trim();
-  const enriched = data
-    .map((row, i) => ({ row, i, pct: rowReturnPct(row) }))
-    .filter((x): x is typeof x & { pct: number } => x.pct !== null)
-    .sort((a, b) => b.pct - a.pct);
+  const benchSlug = process.env.CALA_BENCHMARK_TEAM_ID?.trim().toLowerCase() || "sourish";
+  const summary = summarizeLeaderboardForTeam(data, teamId ?? null, {
+    benchmarkTeamId: benchSlug,
+  });
+  const enriched = summary.enriched.map((x, i) => ({ row: x.row, i, pct: x.pct }));
 
   if (teamId) {
-    const idx = enriched.findIndex((x) => String(x.row.team_id ?? x.row.team ?? "") === teamId);
-    if (idx >= 0) {
-      const ours = enriched[idx]!.pct;
-      const top = enriched[0]!.pct;
+    if (summary.ourRank != null && summary.ourReturnPct != null) {
+      const ours = summary.ourReturnPct;
       console.log(
-        `\n  Your rank: ${idx + 1} / ${enriched.length}  |  return ${(ours >= 0 ? "+" : "") + ours.toFixed(2)}%  |  gap vs #1: ${(top - ours).toFixed(2)} pp`,
+        `\n  Your rank: ${summary.ourRank} / ${enriched.length}  |  return ${(ours >= 0 ? "+" : "") + ours.toFixed(2)}%  |  gap vs #1: ${(summary.gapToFirstPp ?? 0).toFixed(2)} pp`,
       );
     } else {
       console.log(`\n  CALA_TEAM_ID=${teamId} not found on this leaderboard snapshot (${enriched.length} row(s) with return %).`);
@@ -1572,7 +1607,7 @@ async function printLeaderboardCli() {
   console.log(`${"─".repeat(72)}`);
   for (let r = 0; r < Math.min(20, enriched.length); r++) {
     const { row, pct } = enriched[r];
-    const id = String(row.team_id ?? row.team ?? "?");
+    const id = leaderboardRowTeamId(row) || "?";
     const name = String(row.team_name ?? row.name ?? "");
     const label = name ? `${name} (${id})` : id;
     const mine = teamId && id === teamId ? "  ← you" : "";
@@ -1580,38 +1615,25 @@ async function printLeaderboardCli() {
   }
   console.log(`${"═".repeat(72)}\n`);
 
-  const topPct = enriched[0]?.pct ?? null;
-  const sourishRow = enriched.find(
-    x => String(x.row.team_id ?? x.row.team ?? "").toLowerCase() === "sourish",
-  );
-  const sourishPct = sourishRow?.pct ?? null;
-  let ourRank: number | null = null;
-  let ourPct: number | null = null;
-  let gapFirst: number | null = null;
-  if (teamId) {
-    const idx = enriched.findIndex((x) => String(x.row.team_id ?? x.row.team ?? "") === teamId);
-    if (idx >= 0) {
-      ourRank = idx + 1;
-      ourPct = enriched[idx]!.pct;
-      gapFirst = topPct != null && ourPct != null ? topPct - ourPct : null;
-    }
-  }
   appendCalaRunLog(DATA_DIR, {
     phase: "leaderboard",
     team_id: teamId ?? null,
-    rank: ourRank,
-    our_return_pct: ourPct,
-    top_return_pct: topPct,
-    gap_to_first_pp: gapFirst,
+    rank: summary.ourRank,
+    our_return_pct: summary.ourReturnPct,
+    top_return_pct: summary.topReturnPct,
+    gap_to_first_pp: summary.gapToFirstPp,
+    benchmark_team_id: summary.benchmarkTeamId,
+    benchmark_return_pct: summary.benchmarkReturnPct,
+    gap_to_benchmark_pp: summary.gapToBenchmarkPp,
     leaderboard_rows: enriched.length,
   });
-  if (sourishPct != null && ourPct != null) {
+  if (summary.benchmarkReturnPct != null && summary.ourReturnPct != null) {
     console.log(
-      `  Benchmark "sourish": ${sourishPct >= 0 ? "+" : ""}${sourishPct.toFixed(2)}%  |  your gap vs sourish: ${(sourishPct - ourPct).toFixed(2)} pp`,
+      `  Benchmark "${benchSlug}": ${summary.benchmarkReturnPct >= 0 ? "+" : ""}${summary.benchmarkReturnPct.toFixed(2)}%  |  your gap vs ${benchSlug}: ${(summary.gapToBenchmarkPp ?? 0).toFixed(2)} pp`,
     );
-  } else if (sourishPct != null && teamId && ourPct == null) {
+  } else if (summary.benchmarkReturnPct != null && teamId && summary.ourReturnPct == null) {
     console.log(
-      `  Benchmark "sourish": ${sourishPct >= 0 ? "+" : ""}${sourishPct.toFixed(2)}%  (set CALA_TEAM_ID to your team slug to compare)`,
+      `  Benchmark "${benchSlug}": ${summary.benchmarkReturnPct >= 0 ? "+" : ""}${summary.benchmarkReturnPct.toFixed(2)}%  (set CALA_TEAM_ID to your team slug to compare)`,
     );
   }
 }

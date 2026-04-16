@@ -8,7 +8,13 @@ export {
   extractLeaderboardRowsFromJson,
   fetchCalaLeaderboardRows,
   leaderboardRowReturnPct,
+  leaderboardRowTeamId,
+  summarizeLeaderboardForTeam,
   tryFetchCalaLeaderboardRows,
+} from "./leaderboard-fetch";
+export type {
+  LeaderboardRowWithPct,
+  LeaderboardTeamSummary,
 } from "./leaderboard-fetch";
 export {
   DEFAULT_CONVEX_FETCH_MS,

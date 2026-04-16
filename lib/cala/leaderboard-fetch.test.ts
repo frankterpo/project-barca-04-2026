@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractLeaderboardRowsFromJson, leaderboardRowReturnPct } from "./leaderboard-fetch";
+import {
+  extractLeaderboardRowsFromJson,
+  leaderboardRowReturnPct,
+  leaderboardRowTeamId,
+  summarizeLeaderboardForTeam,
+} from "./leaderboard-fetch";
 
 describe("leaderboardRowReturnPct", () => {
   it("uses return_pct when present", () => {
@@ -29,6 +34,24 @@ describe("leaderboardRowReturnPct", () => {
   });
 });
 
+describe("leaderboardRowTeamId", () => {
+  it("prefers team_id string", () => {
+    expect(leaderboardRowTeamId({ team_id: "alpha", team: "beta" })).toBe("alpha");
+  });
+
+  it("coerces numeric team_id for CALA_TEAM_ID comparison", () => {
+    expect(leaderboardRowTeamId({ team_id: 42 })).toBe("42");
+  });
+
+  it("falls back to team", () => {
+    expect(leaderboardRowTeamId({ team: "gamma" })).toBe("gamma");
+  });
+
+  it("empty when missing", () => {
+    expect(leaderboardRowTeamId({})).toBe("");
+  });
+});
+
 describe("extractLeaderboardRowsFromJson", () => {
   it("unwraps { value: [...] }", () => {
     const rows = extractLeaderboardRowsFromJson({ value: [{ team_id: "a", return_pct: 1 }] });
@@ -55,5 +78,37 @@ describe("extractLeaderboardRowsFromJson", () => {
     expect(extractLeaderboardRowsFromJson(null)).toBeNull();
     expect(extractLeaderboardRowsFromJson({})).toBeNull();
     expect(extractLeaderboardRowsFromJson([{ not_a_row: true }])).toBeNull();
+  });
+});
+
+describe("summarizeLeaderboardForTeam", () => {
+  const rows = [
+    { team_id: "alpha", return_pct: 100 },
+    { team_id: "sourish", return_pct: 50 },
+    { team_id: "us", return_pct: 10 },
+  ];
+
+  it("ranks by return and computes gaps vs #1 and default benchmark", () => {
+    const s = summarizeLeaderboardForTeam(rows, "us");
+    expect(s.ourRank).toBe(3);
+    expect(s.ourReturnPct).toBe(10);
+    expect(s.topReturnPct).toBe(100);
+    expect(s.gapToFirstPp).toBeCloseTo(90, 5);
+    expect(s.benchmarkReturnPct).toBe(50);
+    expect(s.gapToBenchmarkPp).toBeCloseTo(40, 5);
+    expect(s.enriched).toHaveLength(3);
+  });
+
+  it("respects CALA-style benchmark override", () => {
+    const s = summarizeLeaderboardForTeam(rows, "us", { benchmarkTeamId: "alpha" });
+    expect(s.benchmarkReturnPct).toBe(100);
+    expect(s.gapToBenchmarkPp).toBeCloseTo(90, 5);
+  });
+
+  it("handles missing team id", () => {
+    const s = summarizeLeaderboardForTeam(rows, null);
+    expect(s.ourRank).toBeNull();
+    expect(s.ourReturnPct).toBeNull();
+    expect(s.gapToFirstPp).toBeNull();
   });
 });

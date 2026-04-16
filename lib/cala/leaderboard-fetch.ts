@@ -75,6 +75,81 @@ export function leaderboardRowReturnPct(row: Record<string, unknown>): number | 
   return null;
 }
 
+/** Stable team key for matching `CALA_TEAM_ID` to leaderboard rows (handles number vs string). */
+export function leaderboardRowTeamId(row: Record<string, unknown>): string {
+  return String(row.team_id ?? row.team ?? "");
+}
+
+/** Rows with a computable return %, sorted best → worst (for rank / gap metrics). */
+export interface LeaderboardRowWithPct {
+  row: Record<string, unknown>;
+  pct: number;
+}
+
+export interface LeaderboardTeamSummary {
+  enriched: LeaderboardRowWithPct[];
+  ourRank: number | null;
+  ourReturnPct: number | null;
+  topReturnPct: number | null;
+  gapToFirstPp: number | null;
+  benchmarkTeamId: string | null;
+  benchmarkReturnPct: number | null;
+  gapToBenchmarkPp: number | null;
+}
+
+const DEFAULT_BENCHMARK_TEAM = "sourish";
+
+/**
+ * Scoreboard analytics: rank, gap vs #1, optional benchmark row (default team id "sourish").
+ * Uses the same return rules as `leaderboardRowReturnPct`.
+ */
+export function summarizeLeaderboardForTeam(
+  rows: Record<string, unknown>[],
+  teamId: string | null | undefined,
+  opts?: { benchmarkTeamId?: string },
+): LeaderboardTeamSummary {
+  const benchmarkSlug = (opts?.benchmarkTeamId ?? DEFAULT_BENCHMARK_TEAM).toLowerCase();
+  const enriched = rows
+    .map((row) => ({ row, pct: leaderboardRowReturnPct(row) }))
+    .filter((x): x is LeaderboardRowWithPct => x.pct !== null)
+    .sort((a, b) => b.pct - a.pct);
+
+  const topReturnPct = enriched[0]?.pct ?? null;
+  let ourRank: number | null = null;
+  let ourReturnPct: number | null = null;
+  const tid = teamId?.trim();
+  if (tid) {
+    const idx = enriched.findIndex((x) => leaderboardRowTeamId(x.row) === tid);
+    if (idx >= 0) {
+      ourRank = idx + 1;
+      ourReturnPct = enriched[idx]!.pct;
+    }
+  }
+  const gapToFirstPp =
+    topReturnPct != null && ourReturnPct != null ? topReturnPct - ourReturnPct : null;
+
+  const benchRow = enriched.find(
+    (x) => leaderboardRowTeamId(x.row).toLowerCase() === benchmarkSlug,
+  );
+  const benchmarkReturnPct = benchRow?.pct ?? null;
+  const benchmarkTeamId = benchRow ? leaderboardRowTeamId(benchRow.row) : null;
+  const gapToBenchmarkPp =
+    benchmarkReturnPct != null && ourReturnPct != null
+      ? benchmarkReturnPct - ourReturnPct
+      : null;
+
+  return {
+    enriched,
+    ourRank,
+    ourReturnPct,
+    topReturnPct,
+    gapToFirstPp,
+    benchmarkTeamId,
+    benchmarkReturnPct,
+    gapToBenchmarkPp,
+  };
+}
+
 function rowLooksLikeLeaderboard(o: Record<string, unknown>): boolean {
   return (
     "return_pct" in o ||
