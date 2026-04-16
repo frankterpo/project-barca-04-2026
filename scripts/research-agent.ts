@@ -2,19 +2,23 @@
  * Lobster IC — Entity-API Research Agent for Cala Leaderboard
  *
  * Pipeline:
- *   Phase 1: entity_search — discover NASDAQ companies via Cala entity API
- *   Phase 2: introspect    — get financial metric UUIDs per company
- *   Phase 3: retrieve      — pull actual financial data (revenue, margins, etc.)
- *   Phase 4: knowledge     — enrich with qualitative Cala research
- *   Phase 5: score         — multi-factor fundamental scoring
- *   Phase 6: allocate      — build $1M portfolio across 50+ stocks
- *   Phase 7: submit        — push to leaderboard
+ *   Phase 1: entity_search  — discover NASDAQ companies via Cala entity API
+ *   Phase 2: research       — enrich with financial + qualitative data via knowledge/search
+ *   Phase 3: score          — multi-factor fundamental scoring
+ *   Phase 4: allocate       — build $1M portfolio across 50+ stocks
+ *   Phase 5: submit         — push to leaderboard
+ *
+ * All entity and research data is cached in data/omnigraph-cache.json.
+ * Once warm, subsequent runs need ZERO Cala API calls.
  *
  * Constraint: No post-April-15-2025 market data or stock prices.
  */
 
 import "dotenv/config";
 import {
+  calaSubmitUrl,
+  DEFAULT_CONVEX_FETCH_MS,
+  fetchConvexEndpointJson,
   getCalaClient,
   type CalaClient,
   type CalaEntityProfile,
@@ -27,10 +31,58 @@ const MIN_STOCKS = 50;
 const MIN_PER_STOCK = 5_000;
 const BASE_DELAY_MS = 500;
 const MAX_RETRIES = 3;
-const BATCH_PAUSE_MS = 2000;
+const CONCURRENCY = 2;
+const CACHE_PATH = "data/omnigraph-cache.json";
+const PRICE_DB_PATH = "data/price-db.json";
+
+/** Apr15→eval returns from price-harvester / Convex submit responses (optional). */
+function loadHarvestReturnMap(): Map<string, number> {
+  const m = new Map<string, number>();
+  try {
+    if (!fs.existsSync(PRICE_DB_PATH)) return m;
+    const raw = JSON.parse(fs.readFileSync(PRICE_DB_PATH, "utf-8")) as {
+      prices?: Record<string, { returnPct?: number }>;
+    };
+    if (!raw.prices) return m;
+    for (const [ticker, row] of Object.entries(raw.prices)) {
+      if (typeof row?.returnPct === "number") m.set(ticker.toUpperCase(), row.returnPct);
+    }
+  } catch {
+    /* ignore corrupt price db */
+  }
+  return m;
+}
+
+// ── Omnigraph Cache ─────────────────────────────────────────────────
+
+interface CachedEntity {
+  uuid: string;
+  name: string;
+  research?: {
+    notes: string[];
+    excerpts: string[];
+    fetchedAt: string;
+  };
+}
+
+type OmnigraphCache = Record<string, CachedEntity>;
+
+function loadCache(): OmnigraphCache {
+  try {
+    if (fs.existsSync(CACHE_PATH)) {
+      return JSON.parse(fs.readFileSync(CACHE_PATH, "utf-8")) as OmnigraphCache;
+    }
+  } catch { /* corrupt cache — start fresh */ }
+  return {};
+}
+
+function saveCache(cache: OmnigraphCache): void {
+  if (!fs.existsSync("data")) fs.mkdirSync("data", { recursive: true });
+  fs.writeFileSync(CACHE_PATH, JSON.stringify(cache, null, 2));
+}
 
 function delay(ms: number) {
-  return new Promise((r) => setTimeout(r, ms + Math.random() * 200));
+  return new Promise((r) => setTimeout(r, ms + Math.random() * 150));
 }
 
 function errMessage(err: unknown): string {
@@ -54,6 +106,33 @@ async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
     }
   }
   throw new Error("unreachable");
+}
+
+async function batchConcurrent<K, V>(
+  items: [K, () => Promise<V>][],
+  concurrency: number,
+): Promise<Map<K, { ok: true; value: V } | { ok: false; error: string }>> {
+  const results = new Map<K, { ok: true; value: V } | { ok: false; error: string }>();
+  for (let i = 0; i < items.length; i += concurrency) {
+    const chunk = items.slice(i, i + concurrency);
+    const settled = await Promise.allSettled(
+      chunk.map(async ([key, fn]) => {
+        const value = await fn();
+        return [key, value] as const;
+      }),
+    );
+    for (let j = 0; j < settled.length; j++) {
+      const s = settled[j];
+      const key = chunk[j][0];
+      if (s.status === "fulfilled") {
+        results.set(key, { ok: true, value: s.value[1] });
+      } else {
+        results.set(key, { ok: false, error: errMessage(s.reason) });
+      }
+    }
+    if (i + concurrency < items.length) await delay(BASE_DELAY_MS);
+  }
+  return results;
 }
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -185,37 +264,81 @@ const TICKER_TO_SEARCH: [string, string][] = [
   ["CPRT", "COPART INC"],
   ["ORLY", "O REILLY AUTOMOTIVE"],
   ["IDXX", "IDEXX LABORATORIES"],
+  // Harvest-discovered leaders and adjacent moonshot sectors
+  ["BE", "BLOOM ENERGY CORPORATION"],
+  ["IREN", "IRIS ENERGY LIMITED"],
+  ["APLD", "APPLIED DIGITAL CORPORATION"],
+  ["WULF", "TERAWULF INC"],
+  ["CIFR", "CIPHER MINING INC"],
+  ["CORZ", "CORE SCIENTIFIC INC"],
+  ["OPEN", "OPENDOOR TECHNOLOGIES INC"],
+  ["UUUU", "ENERGY FUELS INC"],
+  ["BKSY", "BLACKSKY TECHNOLOGY INC"],
+  ["ASTS", "AST SPACEMOBILE INC"],
+  ["RKLB", "ROCKET LAB USA INC"],
+  ["LUNR", "INTUITIVE MACHINES INC"],
+  ["LEU", "CENTRUS ENERGY CORP"],
+  ["CCJ", "CAMECO CORPORATION"],
+  ["BITF", "BITFARMS LTD"],
+  ["RIOT", "RIOT PLATFORMS INC"],
+  ["OKLO", "OKLO INC"],
+  ["HUT", "HUT 8 CORP"],
+  ["VRT", "VERTIV HOLDINGS CO"],
+  ["OUST", "OUSTER INC"],
+  ["UEC", "URANIUM ENERGY CORP"],
+  ["TXG", "10X GENOMICS INC"],
 ];
 
-async function phase1_entitySearch(cala: CalaClient): Promise<Map<string, { uuid: string; name: string }>> {
+async function phase1_entitySearch(
+  cala: CalaClient,
+  cache: OmnigraphCache,
+): Promise<Map<string, { uuid: string; name: string }>> {
   console.log("\n═══ Phase 1: Entity Search ═══");
   const entities = new Map<string, { uuid: string; name: string }>();
 
-  for (let i = 0; i < TICKER_TO_SEARCH.length; i++) {
-    const [ticker, searchName] = TICKER_TO_SEARCH[i];
-    try {
-      const res = await withRetry(
-        () => cala.searchEntities(searchName, { entityTypes: ["Company"], limit: 3 }),
-        ticker,
-      );
-
-      if (res.entities && res.entities.length > 0) {
-        const top = res.entities[0];
-        entities.set(ticker, { uuid: top.id, name: top.name });
-        console.log(`  ✓ ${ticker.padEnd(6)} → ${top.name} (${top.id.slice(0, 8)}...)`);
-      } else {
-        console.log(`  ✗ ${ticker}: no Company entities found for "${searchName}"`);
-      }
-
-      await delay(BASE_DELAY_MS);
-      if ((i + 1) % 15 === 0) {
-        console.log(`    [batch pause ${i + 1}/${TICKER_TO_SEARCH.length}]`);
-        await delay(BATCH_PAUSE_MS);
-      }
-    } catch (err) {
-      console.log(`  ✗ ${ticker}: ${(err as Error).message}`);
-      await delay(BASE_DELAY_MS * 2);
+  const uncached: [string, string][] = [];
+  for (const [ticker, searchName] of TICKER_TO_SEARCH) {
+    const hit = cache[ticker];
+    if (hit?.uuid) {
+      entities.set(ticker, { uuid: hit.uuid, name: hit.name });
+    } else {
+      uncached.push([ticker, searchName]);
     }
+  }
+
+  if (entities.size > 0) {
+    console.log(`  📦 ${entities.size} entities loaded from cache`);
+  }
+
+  if (uncached.length > 0) {
+    console.log(`  🔍 Fetching ${uncached.length} uncached entities...`);
+    const tasks: [string, () => Promise<{ ticker: string; uuid: string; name: string } | null>][] =
+      uncached.map(([ticker, searchName]) => [
+        ticker,
+        async () => {
+          const res = await withRetry(
+            () => cala.searchEntities(searchName, { entityTypes: ["Company"], limit: 3 }),
+            ticker,
+          );
+          if (res.entities && res.entities.length > 0) {
+            const top = res.entities[0];
+            return { ticker, uuid: top.id, name: top.name };
+          }
+          return null;
+        },
+      ]);
+
+    const results = await batchConcurrent(tasks, CONCURRENCY);
+    for (const [ticker, r] of results) {
+      if (r.ok && r.value) {
+        entities.set(ticker, { uuid: r.value.uuid, name: r.value.name });
+        cache[ticker] = { uuid: r.value.uuid, name: r.value.name };
+        console.log(`  ✓ ${ticker.padEnd(6)} → ${r.value.name} (${r.value.uuid.slice(0, 8)}...)`);
+      } else {
+        console.log(`  ✗ ${ticker}: ${r.ok ? "no Company entities found" : r.error}`);
+      }
+    }
+    saveCache(cache);
   }
 
   console.log(`  Found ${entities.size} entities`);
@@ -243,49 +366,53 @@ async function phase2_introspect(
     "total equity", "total liabilities", "cash", "ebitda",
   ];
 
-  let count = 0;
-  for (const [ticker, { uuid }] of entities) {
-    try {
-      const intro = await withRetry(() => cala.introspect(uuid), ticker);
-      const metricUuids = new Map<string, string>();
+  const tasks: [string, () => Promise<IntrospectionResult>][] = [...entities].map(
+    ([ticker, { uuid }]) => [
+      ticker,
+      async () => {
+        const intro = await withRetry(() => cala.introspect(uuid), ticker);
+        const metricUuids = new Map<string, string>();
 
-      if (intro.numerical_observations) {
-        const raw = intro.numerical_observations;
-        const observations = Array.isArray(raw) ? raw : flattenUnknownValues(raw);
-
-        for (const obs of observations) {
-          if (!obs || typeof obs !== "object") continue;
-          const o = obs as { name?: unknown; uuid?: unknown; id?: unknown };
-          if (typeof o.name !== "string") continue;
-          const obsName = o.name.toLowerCase();
-          for (const target of TARGET_METRICS) {
-            if (obsName.includes(target) || target.includes(obsName)) {
-              const id = typeof o.uuid === "string" ? o.uuid : typeof o.id === "string" ? o.id : "";
-              metricUuids.set(o.name, id);
-              break;
+        if (intro.numerical_observations) {
+          const raw = intro.numerical_observations;
+          const observations = Array.isArray(raw) ? raw : flattenUnknownValues(raw);
+          for (const obs of observations) {
+            if (!obs || typeof obs !== "object") continue;
+            const o = obs as { name?: unknown; uuid?: unknown; id?: unknown };
+            if (typeof o.name !== "string") continue;
+            const obsName = o.name.toLowerCase();
+            for (const target of TARGET_METRICS) {
+              if (obsName.includes(target) || target.includes(obsName)) {
+                const id = typeof o.uuid === "string" ? o.uuid : typeof o.id === "string" ? o.id : "";
+                metricUuids.set(o.name, id);
+                break;
+              }
             }
           }
         }
-      }
 
-      const propertyNames: string[] = [];
-      if (intro.properties && Array.isArray(intro.properties)) {
-        for (const prop of intro.properties) {
-          if (prop && typeof prop === "object" && "name" in prop && typeof (prop as { name: unknown }).name === "string") {
-            propertyNames.push((prop as { name: string }).name);
+        const propertyNames: string[] = [];
+        if (intro.properties && Array.isArray(intro.properties)) {
+          for (const prop of intro.properties) {
+            if (prop && typeof prop === "object" && "name" in prop && typeof (prop as { name: unknown }).name === "string") {
+              propertyNames.push((prop as { name: string }).name);
+            }
           }
         }
-      }
 
-      results.set(ticker, { metricUuids, propertyNames });
-      console.log(`  ✓ ${ticker.padEnd(6)} → ${metricUuids.size} financial metrics, ${propertyNames.length} properties`);
-      await delay(BASE_DELAY_MS);
-      count++;
-      if (count % 15 === 0) await delay(BATCH_PAUSE_MS);
-    } catch (err) {
-      console.log(`  ✗ ${ticker}: ${(err as Error).message}`);
+        return { metricUuids, propertyNames };
+      },
+    ],
+  );
+
+  const batchResults = await batchConcurrent(tasks, CONCURRENCY);
+  for (const [ticker, r] of batchResults) {
+    if (r.ok) {
+      results.set(ticker, r.value);
+      console.log(`  ✓ ${ticker.padEnd(6)} → ${r.value.metricUuids.size} financial metrics, ${r.value.propertyNames.length} properties`);
+    } else {
       results.set(ticker, { metricUuids: new Map(), propertyNames: [] });
-      await delay(BASE_DELAY_MS * 2);
+      console.log(`  ✗ ${ticker}: ${r.error}`);
     }
   }
 
@@ -302,80 +429,71 @@ async function phase3_retrieveFinancials(
   console.log("\n═══ Phase 3: Retrieve Financials ═══");
   const snapshots = new Map<string, FinancialSnapshot>();
 
-  let count = 0;
+  const tasks: [string, () => Promise<FinancialSnapshot>][] = [];
   for (const [ticker, { uuid }] of entities) {
     const intro = introspections.get(ticker);
     if (!intro || intro.metricUuids.size === 0) {
       snapshots.set(ticker, { rawMetrics: {} });
       continue;
     }
+    const metricUuidList = [...intro.metricUuids.values()].filter(Boolean);
+    if (metricUuidList.length === 0) {
+      snapshots.set(ticker, { rawMetrics: {} });
+      continue;
+    }
 
-    try {
-      const metricUuidList = [...intro.metricUuids.values()].filter(Boolean);
-      if (metricUuidList.length === 0) {
-        snapshots.set(ticker, { rawMetrics: {} });
-        continue;
-      }
+    tasks.push([
+      ticker,
+      async () => {
+        const projection: EntityProjection = {
+          numerical_observations: { FinancialMetric: metricUuidList },
+        };
+        const entityData: CalaEntityProfile = await withRetry(() => cala.getEntity(uuid, projection), ticker);
+        const rawMetrics: Record<string, number> = {};
 
-      const projection: EntityProjection = {
-        numerical_observations: {
-          FinancialMetric: metricUuidList,
-        },
-      };
-
-      const entityData: CalaEntityProfile = await withRetry(() => cala.getEntity(uuid, projection), ticker);
-      const rawMetrics: Record<string, number> = {};
-
-      const numObsUnknown = entityData.numerical_observations;
-      if (numObsUnknown !== undefined && numObsUnknown !== null) {
-        const observations = Array.isArray(numObsUnknown) ? numObsUnknown : flattenUnknownValues(numObsUnknown);
-
-        for (const obs of observations) {
-          if (!obs || typeof obs !== "object") continue;
-          const o = obs as {
-            name?: unknown;
-            metric_name?: unknown;
-            values?: unknown;
-            data?: unknown;
-            timeseries?: unknown;
-            value?: unknown;
-          };
-          const metricName =
-            (typeof o.name === "string" ? o.name : "") ||
-            (typeof o.metric_name === "string" ? o.metric_name : "") ||
-            "";
-          const valuesRaw = o.values ?? o.data ?? o.timeseries;
-          const values = Array.isArray(valuesRaw) ? valuesRaw : [];
-
-          if (values.length > 0) {
-            const latest = values[values.length - 1];
-            const val =
-              typeof latest === "number"
-                ? latest
+        const numObsUnknown = entityData.numerical_observations;
+        if (numObsUnknown !== undefined && numObsUnknown !== null) {
+          const observations = Array.isArray(numObsUnknown) ? numObsUnknown : flattenUnknownValues(numObsUnknown);
+          for (const obs of observations) {
+            if (!obs || typeof obs !== "object") continue;
+            const o = obs as {
+              name?: unknown; metric_name?: unknown;
+              values?: unknown; data?: unknown; timeseries?: unknown; value?: unknown;
+            };
+            const metricName =
+              (typeof o.name === "string" ? o.name : "") ||
+              (typeof o.metric_name === "string" ? o.metric_name : "") || "";
+            const valuesRaw = o.values ?? o.data ?? o.timeseries;
+            const values = Array.isArray(valuesRaw) ? valuesRaw : [];
+            if (values.length > 0) {
+              const latest = values[values.length - 1];
+              const val =
+                typeof latest === "number" ? latest
                 : latest !== null && typeof latest === "object" && "value" in latest
                   ? (latest as { value?: unknown }).value
-                  : latest !== null && typeof latest === "object" && "y" in latest
-                    ? (latest as { y?: unknown }).y
-                    : undefined;
-            if (typeof val === "number") {
-              rawMetrics[metricName] = val;
+                : latest !== null && typeof latest === "object" && "y" in latest
+                  ? (latest as { y?: unknown }).y
+                : undefined;
+              if (typeof val === "number") rawMetrics[metricName] = val;
+            } else if (typeof o.value === "number") {
+              rawMetrics[metricName] = o.value;
             }
-          } else if (typeof o.value === "number") {
-            rawMetrics[metricName] = o.value;
           }
         }
-      }
 
-      const snapshot = parseFinancials(rawMetrics);
-      snapshots.set(ticker, snapshot);
-      console.log(`  ✓ ${ticker.padEnd(6)} → ${Object.keys(rawMetrics).length} data points`);
-      await delay(BASE_DELAY_MS);
-      count++;
-      if (count % 10 === 0) await delay(BATCH_PAUSE_MS);
-    } catch (err) {
-      console.log(`  ✗ ${ticker}: ${(err as Error).message}`);
+        return parseFinancials(rawMetrics);
+      },
+    ]);
+  }
+
+  const batchResults = await batchConcurrent(tasks, CONCURRENCY);
+  for (const [ticker, r] of batchResults) {
+    if (r.ok) {
+      snapshots.set(ticker, r.value);
+      console.log(`  ✓ ${ticker.padEnd(6)} → ${Object.keys(r.value.rawMetrics).length} data points`);
+    } else {
       snapshots.set(ticker, { rawMetrics: {} });
-      await delay(BASE_DELAY_MS * 2);
+      console.log(`  ✗ ${ticker}: ${r.error}`);
     }
   }
 
@@ -427,41 +545,39 @@ async function phase4_qualitativeResearch(
   console.log("\n═══ Phase 4: Qualitative Enrichment (Cala knowledge/search) ═══");
   const enrichment = new Map<string, { notes: string[]; excerpts: string[] }>();
 
-  const queries = [
+  const queryTemplates = [
     (name: string) => `${name} competitive advantages market position 2024 2025`,
     (name: string) => `${name} growth catalysts revenue outlook 2025`,
   ];
 
-  let count = 0;
-  for (const [ticker, { name }] of companies) {
-    const notes: string[] = [];
-    const excerpts: string[] = [];
-
-    for (const mkQuery of queries) {
-      try {
-        const res = await withRetry(() => cala.search(mkQuery(name)), ticker);
-
-        if (res.answer) {
-          notes.push(res.answer.slice(0, 500));
+  const tasks: [string, () => Promise<{ notes: string[]; excerpts: string[] }>][] = [...companies].map(
+    ([ticker, { name }]) => [
+      ticker,
+      async () => {
+        const notes: string[] = [];
+        const excerpts: string[] = [];
+        for (const mkQuery of queryTemplates) {
+          try {
+            const res = await withRetry(() => cala.search(mkQuery(name)), ticker);
+            if (res.answer) notes.push(res.answer.slice(0, 500));
+            if (res.explainability) {
+              for (const item of res.explainability.slice(0, 3)) {
+                if (item.text) excerpts.push(item.text.slice(0, 300));
+              }
+            }
+          } catch { /* swallow per-query failures */ }
         }
+        return { notes, excerpts };
+      },
+    ],
+  );
 
-        if (res.explainability) {
-          for (const item of res.explainability.slice(0, 3)) {
-            if (item.text) excerpts.push(item.text.slice(0, 300));
-          }
-        }
-
-        await delay(BASE_DELAY_MS);
-      } catch {
-        await delay(BASE_DELAY_MS * 2);
-      }
-    }
-
-    enrichment.set(ticker, { notes, excerpts });
-    const hasData = notes.length > 0 || excerpts.length > 0;
-    console.log(`  ${hasData ? "✓" : "·"} ${ticker.padEnd(6)} → ${notes.length} notes, ${excerpts.length} excerpts`);
-    count++;
-    if (count % 15 === 0) await delay(BATCH_PAUSE_MS);
+  const batchResults = await batchConcurrent(tasks, CONCURRENCY);
+  for (const [ticker, r] of batchResults) {
+    const data = r.ok ? r.value : { notes: [], excerpts: [] };
+    enrichment.set(ticker, data);
+    const hasData = data.notes.length > 0 || data.excerpts.length > 0;
+    console.log(`  ${hasData ? "✓" : "·"} ${ticker.padEnd(6)} → ${data.notes.length} notes, ${data.excerpts.length} excerpts`);
   }
 
   return enrichment;
@@ -599,18 +715,107 @@ function phase5_score(
 
 // ── Phase 6: Portfolio Allocation ──────────────────────────────────
 
-function phase6_allocate(scored: ScoredCompany[]): { ticker: string; amount: number; reasoning: string }[] {
+function phase6_allocate(
+  scored: ScoredCompany[],
+  harvestReturns?: Map<string, number>,
+): { ticker: string; amount: number; reasoning: string }[] {
   console.log("\n═══ Phase 6: Portfolio Allocation ═══");
 
-  const selected = scored.slice(0, Math.max(MIN_STOCKS, Math.min(scored.length, 75)));
-  const totalScore = selected.reduce((s, c) => s + c.compositeScore, 0);
+  const projectedValueFromReturn = (amount: number, returnPct: number) =>
+    amount * (1 + returnPct / 100);
 
-  const allocations = selected.map((c) => {
-    const rawAmount = Math.max(MIN_PER_STOCK, Math.round((c.compositeScore / totalScore) * TOTAL_BUDGET));
-    return { ticker: c.ticker, amount: rawAmount, reasoning: c.reasoning };
+  if (harvestReturns && harvestReturns.size > 0) {
+    const harvested = scored
+      .map((company) => ({
+        company,
+        returnPct: harvestReturns.get(company.ticker),
+      }))
+      .filter(
+        (
+          row,
+        ): row is {
+          company: ScoredCompany;
+          returnPct: number;
+        } => typeof row.returnPct === "number",
+      )
+      .sort((a, b) => b.returnPct - a.returnPct);
+
+    if (harvested.length >= MIN_STOCKS) {
+      const top50 = harvested.slice(0, MIN_STOCKS);
+      const discretionaryBudget = TOTAL_BUDGET - MIN_PER_STOCK * MIN_STOCKS;
+
+      const toAllocations = (bonusByIndex: number[], label: string) => {
+        const allocations = top50.map(({ company, returnPct }, idx) => ({
+          ticker: company.ticker,
+          amount: MIN_PER_STOCK + bonusByIndex[idx],
+          reasoning: `[${label}] Harvested Apr15→today return ${returnPct.toFixed(1)}%. ${company.reasoning}`,
+        }));
+        const projectedValue = top50.reduce(
+          (sum, { returnPct }, idx) =>
+            sum + projectedValueFromReturn(allocations[idx].amount, returnPct),
+          0,
+        );
+        return { allocations, projectedValue };
+      };
+
+      const maxConcentrationBonus = Array.from({ length: MIN_STOCKS }, (_, idx) =>
+        idx === 0 ? discretionaryBudget : 0,
+      );
+
+      const top0 = Math.max(0.01, top50[0].returnPct);
+      const top1 = Math.max(0.01, top50[1].returnPct);
+      const dualConcentrationBonus = Array.from({ length: MIN_STOCKS }, () => 0);
+      dualConcentrationBonus[0] = Math.floor(discretionaryBudget * (top0 / (top0 + top1)));
+      dualConcentrationBonus[1] = discretionaryBudget - dualConcentrationBonus[0];
+
+      const top5WeightBonus = Array.from({ length: MIN_STOCKS }, () => 0);
+      const top5Returns = top50.slice(0, 5).map(({ returnPct }) => Math.max(0.01, returnPct));
+      const top5ReturnSum = top5Returns.reduce((sum, value) => sum + value, 0) || 1;
+      let allocated = 0;
+      for (let i = 0; i < top5Returns.length; i++) {
+        const add = Math.floor(discretionaryBudget * (top5Returns[i] / top5ReturnSum));
+        top5WeightBonus[i] = add;
+        allocated += add;
+      }
+      top5WeightBonus[0] += discretionaryBudget - allocated;
+
+      const candidates = [
+        toAllocations(maxConcentrationBonus, "max_concentrate"),
+        toAllocations(dualConcentrationBonus, "dual_concentrate"),
+        toAllocations(top5WeightBonus, "top5_weighted"),
+      ];
+
+      const best = candidates.reduce((winner, candidate) =>
+        candidate.projectedValue > winner.projectedValue ? candidate : winner,
+      );
+
+      console.log(
+        `  Harvest-driven mode: ${top50.length} known-return tickers, projected $${best.projectedValue.toLocaleString(undefined, {
+          maximumFractionDigits: 0,
+        })}`,
+      );
+      console.log(
+        `  Top 5: ${best.allocations
+          .slice(0, 5)
+          .map((a) => `${a.ticker}=$${a.amount.toLocaleString()}`)
+          .join(", ")}`,
+      );
+      return best.allocations;
+    }
+  }
+
+  const selected = scored.slice(0, Math.min(scored.length, MIN_STOCKS));
+  const totalScore = selected.reduce((sum, company) => sum + company.compositeScore, 0) || 1;
+
+  const allocations = selected.map((company) => {
+    const rawAmount = Math.max(
+      MIN_PER_STOCK,
+      Math.round((company.compositeScore / totalScore) * TOTAL_BUDGET),
+    );
+    return { ticker: company.ticker, amount: rawAmount, reasoning: company.reasoning };
   });
 
-  const currentTotal = allocations.reduce((s, a) => s + a.amount, 0);
+  const currentTotal = allocations.reduce((sum, allocation) => sum + allocation.amount, 0);
   let diff = TOTAL_BUDGET - currentTotal;
 
   allocations.sort((a, b) => b.amount - a.amount);
@@ -622,12 +827,16 @@ function phase6_allocate(scored: ScoredCompany[]): { ticker: string; amount: num
     }
   }
 
-  const finalTotal = allocations.reduce((s, a) => s + a.amount, 0);
+  const finalTotal = allocations.reduce((sum, allocation) => sum + allocation.amount, 0);
   if (finalTotal !== TOTAL_BUDGET && allocations.length > 0) {
     allocations[0].amount += TOTAL_BUDGET - finalTotal;
   }
 
-  console.log(`  ${allocations.length} stocks, $${allocations.reduce((s, a) => s + a.amount, 0).toLocaleString()} total`);
+  console.log(
+    `  Fundamental fallback: ${allocations.length} stocks, $${allocations
+      .reduce((sum, allocation) => sum + allocation.amount, 0)
+      .toLocaleString()} total`,
+  );
   return allocations;
 }
 
@@ -658,16 +867,19 @@ async function phase7_submit(
   console.log(`  Total: $${total.toLocaleString()}`);
   console.log(`  Version: ${version}`);
 
-  const res = await fetch("https://different-cormorant-663.convex.site/api/submit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  const result: unknown = await res.json();
-
-  if (!res.ok) {
-    console.error("  ❌ Submission failed:", JSON.stringify(result, null, 2));
+  let result: unknown;
+  try {
+    result = await fetchConvexEndpointJson<unknown>(
+      calaSubmitUrl(),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      DEFAULT_CONVEX_FETCH_MS,
+    );
+  } catch (e) {
+    console.error("  ❌ Submission failed:", e instanceof Error ? e.message : String(e));
     return null;
   }
 
@@ -742,8 +954,9 @@ export async function runResearchPipeline(opts?: { submit?: boolean; version?: s
   console.log("═══════════════════════════════════════════════════════════\n");
 
   const cala = getCalaClient();
+  const cache = loadCache();
 
-  const entities = await phase1_entitySearch(cala);
+  const entities = await phase1_entitySearch(cala, cache);
   if (entities.size < MIN_STOCKS) {
     console.error(`\n⚠️  Found ${entities.size} entities (need ${MIN_STOCKS}). Proceeding with what we have.`);
   }
@@ -756,7 +969,8 @@ export async function runResearchPipeline(opts?: { submit?: boolean; version?: s
   );
 
   const scored = phase5_score(entities, financials, qualitative);
-  const allocations = phase6_allocate(scored);
+  const harvestReturns = loadHarvestReturnMap();
+  const allocations = phase6_allocate(scored, harvestReturns);
 
   let submissionResult = null;
   if (submit && allocations.length >= MIN_STOCKS) {

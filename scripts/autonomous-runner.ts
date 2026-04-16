@@ -12,11 +12,25 @@
  */
 
 import "dotenv/config";
+import {
+  calaSubmitUrl,
+  DEFAULT_CONVEX_FETCH_MS,
+  fetchConvexEndpointJson,
+  leaderboardRowReturnPct,
+  tryFetchCalaLeaderboardRows,
+} from "../lib/cala";
 import { runResearchPipeline } from "./research-agent";
 import * as fs from "fs";
 
 const STATE_FILE = "data/runner-state.json";
 const DEFAULT_INTERVAL_SEC = 900; // 15 minutes between runs
+
+/** Shape of successful Cala submit HTTP JSON (fields vary by backend version). */
+interface CalaSubmitResponse {
+  submission_id?: string;
+  total_value?: number;
+  total_invested?: number;
+}
 
 interface RunnerState {
   bestReturnPct: number | null;
@@ -66,25 +80,16 @@ function parseArgs() {
   return { dryRun, interval, once };
 }
 
-/** Best return_pct on the public leaderboard (current #1 bar to beat). */
+/** Best return on the public leaderboard (current #1 bar to beat). */
 async function fetchLeaderboardTopReturn(): Promise<number | null> {
-  try {
-    const res = await fetch("https://different-cormorant-663.convex.site/api/leaderboard", {
-      headers: { "Content-Type": "application/json" },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) return null;
-    let top: number | null = null;
-    for (const e of data as { return_pct?: unknown }[]) {
-      if (typeof e.return_pct === "number") {
-        if (top === null || e.return_pct > top) top = e.return_pct;
-      }
-    }
-    return top;
-  } catch {
-    return null;
+  const got = await tryFetchCalaLeaderboardRows(DEFAULT_CONVEX_FETCH_MS);
+  if (!got) return null;
+  let top: number | null = null;
+  for (const row of got.rows) {
+    const p = leaderboardRowReturnPct(row);
+    if (p != null && (top === null || p > top)) top = p;
   }
+  return top;
 }
 
 async function runLoop() {
@@ -114,54 +119,48 @@ async function runLoop() {
     console.log(`${"═".repeat(60)}`);
 
     try {
-      const shouldSubmit = !dryRun;
       const result = await runResearchPipeline({ submit: false, version });
-
-      const returnPct = result.returnPct;
       const allocCount = result.allocations.length;
 
       let submitted = false;
       let submissionId: string | null = null;
+      let returnPct: number | null = null;
 
-      if (shouldSubmit && allocCount >= 50) {
+      if (!dryRun && allocCount >= 50) {
         const allowSubmit = process.env.CALA_ALLOW_SUBMIT === "1";
         if (!allowSubmit) {
           console.log(
             "\n📋 Skipping submission — set CALA_ALLOW_SUBMIT=1 after you explicitly approve real submits."
           );
         } else {
-          const topReturn = await fetchLeaderboardTopReturn();
-          if (topReturn === null) {
-            console.log("\n📋 Skipping submission — could not read leaderboard #1 return.");
-          } else if (returnPct === null) {
-            console.log("\n📋 Skipping submission — no in-run return to compare against #1.");
-          } else if (returnPct > topReturn) {
-            console.log(
-              `\n🚀 Submitting: ${returnPct.toFixed(2)}% beats leaderboard top ${topReturn.toFixed(2)}% (${allocCount} stocks)`
-            );
-            const sub = await submitDirectly(result.allocations, version);
-            if (sub) {
-              submitted = true;
-              submissionId = sub.submission_id || null;
-              const subReturn =
-                sub.total_value && sub.total_invested
-                  ? ((sub.total_value - sub.total_invested) / sub.total_invested) * 100
-                  : null;
+          // Submit to get actual return, then compare against #1
+          console.log(`\n📤 Submitting ${allocCount} allocations to get scored return...`);
+          const sub = await submitDirectly(result.allocations, version);
+          if (sub) {
+            submissionId = sub.submission_id || null;
+            returnPct =
+              sub.total_value && sub.total_invested
+                ? ((sub.total_value - sub.total_invested) / sub.total_invested) * 100
+                : null;
 
-              if (subReturn !== null) {
-                console.log(`  Return: ${subReturn > 0 ? "+" : ""}${subReturn.toFixed(2)}%`);
-                if (state.bestReturnPct === null || subReturn > state.bestReturnPct) {
-                  state.bestReturnPct = subReturn;
-                  state.bestSubmissionId = submissionId;
-                  state.bestVersion = version;
-                  console.log("  🏆 NEW PERSONAL BEST!");
-                }
+            if (returnPct !== null) {
+              submitted = true;
+              console.log(`  Return: ${returnPct > 0 ? "+" : ""}${returnPct.toFixed(2)}%`);
+
+              const topReturn = await fetchLeaderboardTopReturn();
+              if (topReturn !== null && returnPct > topReturn) {
+                console.log(`  🚀 BEATS leaderboard #1 (${topReturn.toFixed(2)}%)!`);
+              } else if (topReturn !== null) {
+                console.log(`  📊 Below #1 (${topReturn.toFixed(2)}%) — keep iterating.`);
+              }
+
+              if (state.bestReturnPct === null || returnPct > state.bestReturnPct) {
+                state.bestReturnPct = returnPct;
+                state.bestSubmissionId = submissionId;
+                state.bestVersion = version;
+                console.log("  🏆 NEW PERSONAL BEST!");
               }
             }
-          } else {
-            console.log(
-              `\n📋 Skipping submission — ${returnPct.toFixed(2)}% does not beat #1 (${topReturn.toFixed(2)}%).`
-            );
           }
         }
       }
@@ -170,7 +169,7 @@ async function runLoop() {
       state.lastRunAt = new Date().toISOString();
       state.history.push({
         version,
-        returnPct: result.returnPct,
+        returnPct,
         submitted,
         submissionId,
         timestamp: new Date().toISOString(),
@@ -202,8 +201,8 @@ async function runLoop() {
 
 async function submitDirectly(
   allocations: { ticker: string; amount: number; reasoning: string }[],
-  version: string
-) {
+  version: string,
+): Promise<CalaSubmitResponse | null> {
   const teamId = process.env.CALA_TEAM_ID?.trim();
   if (!teamId) throw new Error("CALA_TEAM_ID required");
 
@@ -217,20 +216,29 @@ async function submitDirectly(
     })),
   };
 
-  const res = await fetch("https://different-cormorant-663.convex.site/api/submit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  const result = await res.json();
-  if (!res.ok) {
-    console.error("  Submission failed:", JSON.stringify(result));
+  let result: unknown;
+  try {
+    result = await fetchConvexEndpointJson<unknown>(
+      calaSubmitUrl(),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      DEFAULT_CONVEX_FETCH_MS,
+    );
+  } catch (e) {
+    console.error("  Submission failed:", e instanceof Error ? e.message : String(e));
     return null;
   }
 
-  console.log("  ✅ Submitted:", result.submission_id || "ok");
-  return result;
+  console.log(
+    "  ✅ Submitted:",
+    result !== null && typeof result === "object" && "submission_id" in result
+      ? (result as CalaSubmitResponse).submission_id || "ok"
+      : "ok",
+  );
+  return result as CalaSubmitResponse;
 }
 
 runLoop().catch((err) => {

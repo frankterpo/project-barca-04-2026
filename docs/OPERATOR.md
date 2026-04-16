@@ -21,7 +21,13 @@ For the scaffold, you only need `APP_URL` (optional). Real keys land in M2–M4 
 
 **Cala (M2):** set `CALA_API_KEY` and `CALA_TEAM_ID` in `.env`. Both are required — the HTTP client (`lib/cala/client.ts`) fails fast on startup without them. `CALA_BASE_URL` is optional (defaults to `https://api.cala.ai`).
 
-**Live submission (autonomous runner):** `scripts/autonomous-runner.ts` can call Cala’s submit API when not in dry-run and `allocCount >= 50`. That path is gated: your run’s `return_pct` must **strictly beat** the current leaderboard #1 (max return on the board), and you must set **`CALA_ALLOW_SUBMIT=1`** in `.env` only after explicit operator approval. Without it, the runner logs and skips submit.
+**Leaderboard URL:** Scripts try, in order: `CALA_LEADERBOARD_URL` (if you set only a site root, the same host’s `/api/leaderboard` is tried next), `{origin}/api/leaderboard` from `CALA_SUBMIT_URL`, each URL in `CALA_LEADERBOARD_URLS`, then the default Convex deployment. The response must be JSON: a **non-empty array** of rows (with `return_pct` and/or `total_value`, etc.). If you get HTML or 404, ask the operator for the JSON endpoint and set `CALA_LEADERBOARD_URL`, or add fallbacks in `CALA_LEADERBOARD_URLS`. Verify with `pnpm tsx scripts/price-harvester.ts --leaderboard` (prints which URL worked).
+
+**Harvest throughput:** `scripts/price-harvester.ts` orders unknown tickers so **liquid / priority** names fill the first slots in each batch; micro-caps and lottery names follow. Bad symbols from API errors are stripped and batches refilled using the same ordering.
+
+**Live submission:** Portfolio POSTs from `scripts/price-harvester.ts --optimize` (without `--dry-run`) and from `scripts/autonomous-runner.ts` require **`CALA_ALLOW_SUBMIT=1`** when you intentionally want real submits. The autonomous runner also only submits when the scored return beats leaderboard #1; without `CALA_ALLOW_SUBMIT=1` it logs and skips.
+
+**Iteration (Cala / gstack-style):** After each competitor round run `pnpm tsc --noEmit` and `pnpm lint` and fix regressions. For larger design changes, capture decisions in a short `PLAN.md` (or Cursor plan mode) and run `/gstack-plan-eng-review` on it; optional `/review` or `/gstack-review` on the diff before merge.
 
 API routes available after startup:
 
