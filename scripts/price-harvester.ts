@@ -108,6 +108,22 @@ function savePriceDB(db: PriceDB) {
   writeFileSync(PRICE_DB_PATH, JSON.stringify(db, null, 2));
 }
 
+/**
+ * Entry quality: `price-db.json` is a cache of **live** submit responses (`purchase_prices_apr15` /
+ * `eval_prices_today`), not a separate quote API. Re-run `--harvest` to refresh before `--optimize`.
+ */
+function maybeWarnStalePriceDb(db: PriceDB) {
+  const maxH = Number(process.env.CALA_PRICE_DB_WARN_STALE_HOURS ?? "48");
+  if (maxH <= 0) return;
+  const age = priceDbAgeHours(db.lastUpdated);
+  if (age != null && age <= maxH) return;
+  console.warn(
+    `   ⚠️  price-db stale or unknown age: lastUpdated=${db.lastUpdated}` +
+      (age != null ? ` (~${age.toFixed(1)}h ago)` : "") +
+      ` (warn if >${maxH}h). Re-run --harvest. CALA_PRICE_DB_WARN_STALE_HOURS=0 silences.`,
+  );
+}
+
 function loadPersistedBadTickers(): string[] {
   try {
     if (existsSync(BAD_TICKERS_PATH)) {
@@ -859,8 +875,35 @@ const ALL_TICKERS = [
   // === WAVE 7: CHINESE NANO-CAPs that moon ===
   "JZ", "LITM", "NIO", "LI", "XPEV",
   "CPOP", "AIXI", "NISN", "WISA", "CXDO",
-  "RCAT", "UMAC", "BRLT", "UTME", "EZGO",
+  "RCAT", "UMAC", "BRLT",   "UTME", "EZGO",
 ];
+
+/** Optional: merge tickers from research-agent (`data/research-harvest-candidates.json`) and CALA_HARVEST_CANDIDATE_FILES. */
+const RESEARCH_HARVEST_CANDIDATES_REL = "data/research-harvest-candidates.json";
+
+function discoverHarvestUniverse(): string[] {
+  const extraPaths: string[] = [];
+  const envFiles = process.env.CALA_HARVEST_CANDIDATE_FILES?.trim();
+  if (envFiles) {
+    for (const p of envFiles.split(/[,\s]+/)) {
+      const s = p.trim();
+      if (s) extraPaths.push(s);
+    }
+  }
+  if (process.env.CALA_MERGE_RESEARCH_CANDIDATES !== "0") {
+    const abs = join(process.cwd(), RESEARCH_HARVEST_CANDIDATES_REL);
+    if (existsSync(abs) && !extraPaths.includes(RESEARCH_HARVEST_CANDIDATES_REL)) {
+      extraPaths.push(RESEARCH_HARVEST_CANDIDATES_REL);
+    }
+  }
+  const loaded = loadHarvestCandidateFiles(extraPaths);
+  const fromFiles = loaded.flatMap(l => l.tickers);
+  return buildHarvestUniverse(ALL_TICKERS, process.env.CALA_EXTRA_TICKERS, fromFiles);
+}
+
+/** Deduped list: valid 1–5 letter symbols only; merges research/candidate JSON when configured. */
+const HARVEST_UNIVERSE = discoverHarvestUniverse();
+const UNIVERSE_RAW_INVALID_FORMAT = splitHarvestUniverse(ALL_TICKERS).invalidFormat.length;
 
 function dedup(tickers: string[]): string[] {
   const seen = new Set<string>();
@@ -1067,7 +1110,7 @@ async function submitAndHarvest(
       savePersistedBadTickers(badTickers);
       const newTickers = use.filter(t => !bads.includes(t));
       while (newTickers.length < MIN_STOCKS) {
-        const replacement = harvestReplacementCandidates(db, ALL_TICKERS).find(t => !newTickers.includes(t));
+        const replacement = harvestReplacementCandidates(db, HARVEST_UNIVERSE).find(t => !newTickers.includes(t));
         if (!replacement) break;
         newTickers.push(replacement);
       }
@@ -1093,14 +1136,23 @@ async function submitAndHarvest(
 
 async function harvest() {
   const db = loadPriceDB();
-  const unique = dedup(ALL_TICKERS);
+  maybeWarnStalePriceDb(db);
+  const unique = HARVEST_UNIVERSE;
   const pending = unique.filter(t => !db.prices[t] && !badTickers.has(t));
-  const chunks = buildHarvestBatches(ALL_TICKERS, db);
+  let chunks = buildHarvestBatches(HARVEST_UNIVERSE, db);
+  const maxBatches = Number(process.env.CALA_HARVEST_MAX_BATCHES ?? "0");
+  if (maxBatches > 0 && chunks.length > maxBatches) {
+    console.log(`   CALA_HARVEST_MAX_BATCHES=${maxBatches}: limiting to first ${maxBatches}/${chunks.length} batch(es)`);
+    chunks = chunks.slice(0, maxBatches);
+  }
 
   console.log(
-    `🌾 Price Harvester — ${unique.length} universe, ${pending.length} pending, ${chunks.length} batch(es), concurrency=${CONCURRENCY}`,
+    `🌾 Price Harvester — ${unique.length} harvest universe (${ALL_TICKERS.length} raw list, ${UNIVERSE_RAW_INVALID_FORMAT} invalid-format dropped), ${pending.length} pending, ${chunks.length} batch(es), concurrency=${CONCURRENCY}`,
   );
-  console.log(`   Cached: ${Object.keys(db.prices).length} | Bad: ${badTickers.size}\n`);
+  console.log(`   Cached: ${Object.keys(db.prices).length} | Bad: ${badTickers.size}`);
+  console.log(
+    `   Note: prices come from live submit responses (Apr-15 buy vs mark); refresh with --harvest before trusting --optimize.\n`,
+  );
 
   if (chunks.length === 0) {
     console.log("   Nothing to harvest (all known or blocked). Use --show or expand ALL_TICKERS.");
@@ -1212,6 +1264,7 @@ function showRankings(db: PriceDB) {
 
 async function optimize(dryRun: boolean) {
   const db = loadPriceDB();
+  maybeWarnStalePriceDb(db);
   const entries = Object.values(db.prices).sort((a, b) => b.returnPct - a.returnPct);
 
   if (entries.length < MIN_STOCKS) {
@@ -1648,6 +1701,7 @@ async function main() {
     await optimize(dryRun);
   } else if (args.includes("--show")) {
     const db = loadPriceDB();
+    maybeWarnStalePriceDb(db);
     console.log(`Price DB: ${Object.keys(db.prices).length} tickers (updated ${db.lastUpdated})`);
     showRankings(db);
   } else if (args.includes("--auto")) {
@@ -1663,7 +1717,10 @@ async function main() {
     console.log("  --leaderboard  Print live scoreboard (sorted by return)");
     console.log("  --auto       Continuous loop: harvest → optimize → repeat");
     console.log(
-      "  Env: CALA_LEADERBOARD_URL (+ auto /api/leaderboard on that host), CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL origin; CALA_ALLOW_SUBMIT=1 for live --optimize POST",
+      "  Env: CALA_LEADERBOARD_URL, CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL; CALA_ALLOW_SUBMIT=1 for live --optimize POST",
+    );
+    console.log(
+      "  Harvest universe: CALA_EXTRA_TICKERS, CALA_HARVEST_CANDIDATE_FILES, CALA_MERGE_RESEARCH_CANDIDATES (≠0 merges data/research-harvest-candidates.json if present), CALA_HARVEST_MAX_BATCHES, CALA_PRICE_DB_WARN_STALE_HOURS",
     );
   }
 }

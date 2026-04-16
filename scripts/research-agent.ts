@@ -1007,6 +1007,26 @@ function saveResults(
     fs.writeFileSync(`data/submission-entity-${ts}.json`, JSON.stringify(submissionResult, null, 2));
     console.log(`💾 Submission result saved to data/submission-entity-${ts}.json`);
   }
+
+  /** Feed `scripts/price-harvester.ts` when CALA_MERGE_RESEARCH_CANDIDATES≠0 (default merges if file exists). */
+  try {
+    const tickers = [...new Set(scored.map((s) => s.ticker.trim().toUpperCase()).filter(Boolean))];
+    const candidatePayload = {
+      generated_at: new Date().toISOString(),
+      source: "research-agent",
+      pipeline_version: version,
+      provenance:
+        "Entity search + scoring only; returns for allocation still come from price-harvester submit cache.",
+      tickers,
+    };
+    fs.writeFileSync(
+      join(CALA_DATA_DIR, "research-harvest-candidates.json"),
+      JSON.stringify(candidatePayload, null, 2),
+    );
+    console.log(`💾 Harvest candidate tickers → data/research-harvest-candidates.json (${tickers.length})`);
+  } catch (e) {
+    console.warn("Could not write data/research-harvest-candidates.json:", errMessage(e));
+  }
 }
 
 // ── Main ───────────────────────────────────────────────────────────
