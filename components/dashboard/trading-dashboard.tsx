@@ -140,7 +140,32 @@ export function TradingDashboard() {
     try {
       const res = await fetch("/api/graph/portfolio");
       const json = await res.json();
-      if (json.ok) setPortfolio(json as PortfolioData);
+      if (!json.ok) return;
+
+      const holdings: Ticker[] = (json.holdings ?? []).map((h: Record<string, unknown>) => ({
+        ticker: (h.ticker ?? "") as string,
+        purchasePrice: Number(h.purchasePrice ?? h.purchase_price ?? 0),
+        evalPrice: Number(h.evalPrice ?? h.eval_price ?? 0),
+        returnPct: Number(h.returnPct ?? h.return_pct ?? 0),
+      }));
+
+      const sorted = [...holdings].sort((a, b) => b.returnPct - a.returnPct);
+      const winners = sorted.filter((t) => t.returnPct > 0);
+
+      setPortfolio({
+        ok: true,
+        lastUpdated: (json.lastUpdated ?? json.run?.updated_at ?? "") as string,
+        totalTickers: holdings.length,
+        winnersCount: winners.length,
+        losersCount: holdings.length - winners.length,
+        avgReturn: holdings.length > 0
+          ? holdings.reduce((s, t) => s + t.returnPct, 0) / holdings.length
+          : 0,
+        bestPerformer: sorted[0] ?? null,
+        worstPerformer: sorted[sorted.length - 1] ?? null,
+        top30: sorted.slice(0, 30),
+        bottom10: sorted.slice(-10).reverse(),
+      });
     } catch {}
   }, []);
 
@@ -368,7 +393,7 @@ export function TradingDashboard() {
       </div>
 
       {/* ── Portfolio Holdings ────────────────────────────── */}
-      {portfolio && (portfolio.top30.length > 0 || portfolio.bottom10.length > 0) && (
+      {portfolio && ((portfolio.top30?.length ?? 0) > 0 || (portfolio.bottom10?.length ?? 0) > 0) && (
         <div className="rounded-xl border border-border-subtle bg-bg-elevated overflow-hidden">
           <div className="flex items-center justify-between border-b border-border-subtle bg-bg-muted/40 px-4 py-3">
             <h2 className="text-sm font-semibold text-text-primary">

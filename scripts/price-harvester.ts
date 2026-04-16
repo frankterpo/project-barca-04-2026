@@ -19,6 +19,26 @@ import {
   leaderboardRowReturnPct,
   tryFetchCalaLeaderboardRows,
 } from "@/lib/cala";
+import { appendCalaRunLog } from "@/lib/cala-run-log";
+import {
+  CALA_PORTFOLIO_MIN_STOCKS as MIN_STOCKS,
+  CALA_PORTFOLIO_TOTAL_BUDGET as TOTAL_BUDGET,
+  type CalaAllocationRow,
+  type CalaPortfolioAudit,
+  type CalaPriceEntry,
+  auditAllocations,
+  buildDualConcentration,
+  buildEqualAllocations,
+  buildMaxConcentration,
+  buildReturnProportional,
+  buildTopWeighted,
+  buildTripleConcentration,
+  validateAllocationsError as validateAllocations,
+} from "@/lib/cala-portfolio-math";
+
+type Allocation = CalaAllocationRow;
+type PriceEntry = CalaPriceEntry;
+type PortfolioAudit = CalaPortfolioAudit;
 import { getOmnigraphClient, probeOmnigraphHealth } from "@/lib/omnigraph/client";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "fs";
 import { join } from "path";
@@ -26,9 +46,6 @@ import { join } from "path";
 function submitUrl(): string {
   return calaSubmitUrl();
 }
-const TOTAL_BUDGET = 1_000_000;
-const MIN_PER_STOCK = 5_000;
-const MIN_STOCKS = 50;
 const FETCH_TIMEOUT_MS = Number(process.env.CALA_FETCH_TIMEOUT_MS ?? 120_000);
 const HARVEST_RETRY_LIMIT = 10;
 const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
@@ -54,33 +71,9 @@ const DATA_DIR = resolveDataDir();
 const PRICE_DB_PATH = join(DATA_DIR, "price-db.json");
 const BAD_TICKERS_PATH = join(DATA_DIR, "bad-tickers.json");
 
-interface PriceEntry {
-  ticker: string;
-  purchasePrice: number;
-  evalPrice: number;
-  returnPct: number;
-}
-
 interface PriceDB {
   lastUpdated: string;
   prices: Record<string, PriceEntry>;
-}
-
-interface Allocation {
-  nasdaq_code: string;
-  amount: number;
-}
-
-interface PortfolioAudit {
-  name: string;
-  lineCount: number;
-  uniqueCount: number;
-  duplicateTickers: string[];
-  totalAmount: number;
-  minAmount: number;
-  belowMinTickers: string[];
-  valid: boolean;
-  error: string | null;
 }
 
 function loadPriceDB(): PriceDB {
@@ -250,6 +243,7 @@ const ALL_TICKERS = [
   "ALAB", "BMNR", "TMC", "CDLX", "TERN", "ONDS", "CRWV", "PSTG", "RUM", "RCUS",
   "RR", "CRCL", "LICY", "RZLT", "KROS", "PHAT", "AIRE", "MVIS", "LPSN", "COMM",
   "XERS", "WK", "PRME", "SANA", "RZLV", "DFLI", "IVVD", "SOC", "ASPI",
+  "UMAC", "USAR", "CRML", "PGY", "FIGR", "LYRA", "BNAI", "ORMP", "INMB", "QNCX",
 
   // === Crypto mining / BTC infrastructure (likely moonshot territory) ===
   "MARA", "RIOT", "CLSK", "HUT", "BITF", "BTBT", "BTDR",
@@ -770,6 +764,39 @@ const ALL_TICKERS = [
   // === WAVE 5: Extra nano-cap / clinical-stage probes (competitor sweep) ===
   "RANI", "CGTX", "IMNN", "KNSA", "SLRX", "ALLR", "ABVE", "HOWL",
   "TCRX", "MIRA", "FDMT", "PHVS",
+
+  // === WAVE 6: VERIFIED HIGH-RETURN TICKERS (Apr 2025→2026 research) ===
+  // Top verified percentage gainers from NerdWallet/StatMuse/Stocknear
+  "RELI", "CHEK", "QMMM", "BW", "NINE", "RGC", "SHAZ", "SNDK",
+  "KOD", "SLGL", "TNGX", "ERAS", "ANRO", "CELC", "XWIN",
+  "DMRA", "MGRT", "EXAS", "BNAI", "PRAX", "LWLG", "ONDS",
+  "NEGG", "OVID", "HYMC",
+
+  // Extreme micro/nano-cap movers (sub-penny → dollars potential)
+  "PBLA", "CREV", "SKYQ", "BIAF", "MLGO", "ICCT", "CSAI",
+  "ABAT", "WNW", "PSTV", "CRVS",
+
+  // User-requested tickers (remaining not already in list)
+  "VINE", "TOP", "XELA", "OBLG", "PRFX", "TCON", "SNOA", "AEMD",
+  "NXGL", "SATL", "BFRG",
+
+  // More extreme nano-cap / pink-to-NASDAQ uplist candidates
+  "EHYD", "CBDS", "OZSC", "HCDI", "DPSI", "WBUY", "ELEK", "EVIO",
+  "MBOT", "RGBP", "LEDS", "ABEO", "CMRX", "CSSE", "DFFN", "EDTX",
+  "ETNB", "FEMY", "GRNQ", "HOOK", "ILAG", "KTTA", "LXRX", "MYSZ",
+  "NDRA", "ONCS", "PAVS", "PEGY", "RUBY", "SBET", "TRVG", "VVOS",
+  "XAIR", "ZIVO", "BRSH", "MKFG",
+
+  // More crypto/BTC plays not yet harvested
+  "BKKT", "CIFR", "MSTR", "COIN", "SOS", "EBON", "BTCY",
+
+  // Additional biotech micro-caps with binary event potential
+  "INBS", "ARDS", "CLRB", "CASI", "AGTC", "ATOS", "CALA",
+  "CYCC", "DERM", "FLGT", "GLSI", "GTBP", "HGEN", "HSTO",
+  "IDBA", "IMRN", "INMB", "IPHA", "KPTI", "LPCN", "MRTX",
+  "NBRV", "NEOS", "NVAX", "OCUP", "ONCT", "ORPH", "PRTA",
+  "PTGX", "RLAY", "SBBP", "SENS", "SGMO", "SNGX", "TARS",
+  "TTOO", "TXMD", "VBIV", "VRCA", "VTGN", "ZNTL",
 ];
 
 function dedup(tickers: string[]): string[] {
@@ -836,7 +863,9 @@ const badTickers = new Set<string>([
 function harvestReplacementCandidates(db: PriceDB, universeOrder: string[]): string[] {
   const u = dedup(universeOrder).filter(t => !badTickers.has(t));
   const pending = u.filter(t => !db.prices[t]);
-  return sortPendingForHarvest(pending, universeOrder);
+  const cached = u.filter(t => db.prices[t])
+    .sort((a, b) => (db.prices[a].returnPct ?? 0) - (db.prices[b].returnPct ?? 0));
+  return [...sortPendingForHarvest(pending, universeOrder), ...cached];
 }
 
 function chunkInto50(tickers: string[]): string[][] {
@@ -872,17 +901,6 @@ function buildHarvestBatches(tickers: string[], db: PriceDB): string[][] {
   return chunkInto50(ordered);
 }
 
-function buildEqualAllocations(tickers: string[]): Allocation[] {
-  const n = tickers.length;
-  const perStock = Math.floor(TOTAL_BUDGET / n);
-  let remainder = TOTAL_BUDGET - perStock * n;
-  return tickers.map(t => {
-    const extra = remainder > 0 ? 1 : 0;
-    if (remainder > 0) remainder--;
-    return { nasdaq_code: t, amount: perStock + extra };
-  });
-}
-
 function extractBadTicker(errorStr: string): string | null {
   const up = (s: string) => s.toUpperCase();
   const m0 = errorStr.match(/(\w+): No closing price found/i);
@@ -906,45 +924,6 @@ function extractAllBadTickers(detail: string): string[] {
   const whole = extractBadTicker(detail);
   if (whole) seen.add(whole);
   return [...seen];
-}
-
-function auditAllocations(name: string, allocs: Allocation[]): PortfolioAudit {
-  const seen = new Set<string>();
-  const duplicateTickers: string[] = [];
-  const belowMinTickers: string[] = [];
-  let totalAmount = 0;
-  let minAmount = Number.POSITIVE_INFINITY;
-
-  for (const alloc of allocs) {
-    const ticker = alloc.nasdaq_code.toUpperCase();
-    if (seen.has(ticker)) duplicateTickers.push(ticker);
-    seen.add(ticker);
-    totalAmount += alloc.amount;
-    minAmount = Math.min(minAmount, alloc.amount);
-    if (alloc.amount < MIN_PER_STOCK) belowMinTickers.push(`${ticker}=$${alloc.amount}`);
-  }
-
-  const lineCount = allocs.length;
-  const uniqueCount = seen.size;
-  const minValue = Number.isFinite(minAmount) ? minAmount : 0;
-  let error: string | null = null;
-
-  if (lineCount !== MIN_STOCKS) error = `need ${MIN_STOCKS} stocks, got ${lineCount}`;
-  else if (uniqueCount !== lineCount) error = `duplicate ticker(s): ${duplicateTickers.join(", ")}`;
-  else if (belowMinTickers.length > 0) error = `below min: ${belowMinTickers.join(", ")}`;
-  else if (totalAmount !== TOTAL_BUDGET) error = `sum $${totalAmount} !== $${TOTAL_BUDGET}`;
-
-  return {
-    name,
-    lineCount,
-    uniqueCount,
-    duplicateTickers,
-    totalAmount,
-    minAmount: minValue,
-    belowMinTickers,
-    valid: error === null,
-    error,
-  };
 }
 
 function logAllocationAudit(audit: PortfolioAudit) {
@@ -1056,6 +1035,14 @@ async function harvest() {
   if (chunks.length === 0) {
     console.log("   Nothing to harvest (all known or blocked). Use --show or expand ALL_TICKERS.");
     showRankings(db);
+    appendCalaRunLog(DATA_DIR, {
+      phase: "harvest",
+      team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+      price_db_count: Object.keys(db.prices).length,
+      bad_ticker_count: badTickers.size,
+      harvest_new_prices: 0,
+      harvest_elapsed_s: 0,
+    });
     return;
   }
 
@@ -1108,6 +1095,14 @@ async function harvest() {
   const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
   console.log(`\n✅ Harvest complete: ${Object.keys(db.prices).length} total prices (${totalNew} new) in ${elapsed}s`);
   console.log(`   Bad tickers (persisted): ${badTickers.size}`);
+  appendCalaRunLog(DATA_DIR, {
+    phase: "harvest",
+    team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+    price_db_count: Object.keys(db.prices).length,
+    bad_ticker_count: badTickers.size,
+    harvest_new_prices: totalNew,
+    harvest_elapsed_s: Number(elapsed),
+  });
   showRankings(db);
 }
 
@@ -1145,10 +1140,6 @@ function showRankings(db: PriceDB) {
   }
 }
 
-function validateAllocations(allocs: Allocation[]): string | null {
-  return auditAllocations("validation", allocs).error;
-}
-
 async function optimize(dryRun: boolean) {
   const db = loadPriceDB();
   const entries = Object.values(db.prices).sort((a, b) => b.returnPct - a.returnPct);
@@ -1179,6 +1170,7 @@ async function optimize(dryRun: boolean) {
   // Strategy C: Return-proportional for top 50
   const strategyC = buildReturnProportional(entries);
   const strategyD = buildDualConcentration(entries);
+  const strategyE = buildTripleConcentration(entries);
 
   console.log(`\n${"═".repeat(70)}`);
   console.log(`  OPTIMIZATION STRATEGIES`);
@@ -1189,6 +1181,7 @@ async function optimize(dryRun: boolean) {
     { name: "top_weighted", allocs: strategyB },
     { name: "return_proportional", allocs: strategyC },
     { name: "dual_concentrate", allocs: strategyD },
+    { name: "triple_concentrate", allocs: strategyE },
   ];
 
   for (const s of strategies) {
@@ -1233,8 +1226,21 @@ async function optimize(dryRun: boolean) {
     console.error(`   ❌ Best strategy failed validation: ${submitErr}`);
     return;
   }
+
+  const bestProjected = projectedVal(bestStrategy.allocs);
+  const bestProjectedReturn = ((bestProjected - TOTAL_BUDGET) / TOTAL_BUDGET) * 100;
+
   if (dryRun) {
     console.log(`   --dry-run: skipping POST to ${submitUrl()}`);
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_dry_run",
+      team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+      best_strategy: bestStrategy.name,
+      dry_run: true,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      price_db_count: entries.length,
+    });
     return;
   }
 
@@ -1242,6 +1248,16 @@ async function optimize(dryRun: boolean) {
     console.error(
       "   ❌ Live optimize submit blocked — set CALA_ALLOW_SUBMIT=1 after operator approval, or use --dry-run.",
     );
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_submit_blocked",
+      team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+      best_strategy: bestStrategy.name,
+      dry_run: false,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      price_db_count: entries.length,
+      error_message: "CALA_ALLOW_SUBMIT is not 1",
+    });
     return;
   }
 
@@ -1291,12 +1307,33 @@ async function optimize(dryRun: boolean) {
   }
 
   const result = await trySubmit(bestStrategy.allocs, bestStrategy.name, 1);
-  if (!result) return;
+  if (!result) {
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_submit_failed",
+      team_id: teamId,
+      best_strategy: bestStrategy.name,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      error_message: "submit returned null (HTTP error or exhausted retries)",
+    });
+    return;
+  }
 
   const value = result.total_value as number;
   const invested = result.total_invested as number;
   const ret = ((value - invested) / invested) * 100;
   console.log(`   ✅ ACTUAL: $${value?.toLocaleString()} (${ret > 0 ? "+" : ""}${ret.toFixed(2)}%)`);
+  appendCalaRunLog(DATA_DIR, {
+    phase: "optimize_submit",
+    team_id: teamId,
+    best_strategy: bestStrategy.name,
+    submit_return_pct: ret,
+    projected_value_usd: bestProjected,
+    projected_return_pct: bestProjectedReturn,
+    actual_total_value_usd: value,
+    actual_invested_usd: invested,
+    price_db_count: entries.length,
+  });
 
   // Update prices from response
   const pp = (result.purchase_prices_apr15 ?? {}) as Record<string, number>;
@@ -1313,110 +1350,6 @@ async function optimize(dryRun: boolean) {
   syncPortfolioRunToOmnigraph(runId, bestStrategy.name, value, ret, bestStrategy.allocs, db);
 }
 
-function buildMaxConcentration(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  // #1 stock gets max budget, bottom 49 get minimum
-  const top = entries.slice(0, 50);
-  const minBudget = MIN_PER_STOCK * 49;
-  const topBudget = TOTAL_BUDGET - minBudget;
-  
-  return top.map((e, i) => ({
-    nasdaq_code: e.ticker,
-    amount: i === 0 ? topBudget : MIN_PER_STOCK,
-  }));
-}
-
-function buildTopWeighted(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  const top50 = entries.slice(0, 50);
-  const topN = 5;
-  const disc = TOTAL_BUDGET - MIN_PER_STOCK * 50;
-  const topPool = Math.floor(disc * 0.8);
-  const botPool = disc - topPool;
-  const amounts = top50.map(() => MIN_PER_STOCK);
-
-  const topReturns = top50.slice(0, topN).map(e => Math.max(0, e.returnPct));
-  const topSum = topReturns.reduce((s, r) => s + r, 0) || 1;
-  let allocatedTop = 0;
-  for (let i = 0; i < topN; i++) {
-    const add = Math.floor(topPool * (topReturns[i] / topSum));
-    amounts[i] += add;
-    allocatedTop += add;
-  }
-  const topRem = topPool - allocatedTop;
-
-  const botCount = 50 - topN;
-  const perBot = Math.floor(botPool / botCount);
-  for (let i = topN; i < 50; i++) {
-    amounts[i] += perBot;
-  }
-  const botAllocated = perBot * botCount;
-  const botRem = botPool - botAllocated;
-
-  const sprinkle = (rem: number, indices: number[]) => {
-    let k = 0;
-    while (rem > 0 && indices.length > 0) {
-      amounts[indices[k % indices.length]]++;
-      rem--;
-      k++;
-    }
-  };
-  const topIdx = [...Array(topN).keys()].sort((a, b) => topReturns[b] - topReturns[a]);
-  sprinkle(topRem, topIdx);
-  sprinkle(botRem, [...Array(botCount).keys()].map(i => i + topN));
-
-  return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
-}
-
-function buildReturnProportional(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  const top50 = entries.slice(0, 50);
-  const disc = TOTAL_BUDGET - MIN_PER_STOCK * 50;
-  const returns = top50.map(e => Math.max(0.01, e.returnPct));
-  const totalR = returns.reduce((s, r) => s + r, 0);
-  const amounts = top50.map(() => MIN_PER_STOCK);
-  let allocated = 0;
-  for (let i = 0; i < 50; i++) {
-    const add = Math.floor(disc * (returns[i] / totalR));
-    amounts[i] += add;
-    allocated += add;
-  }
-  let rem = disc - allocated;
-  const idx = [...Array(50).keys()].sort((a, b) => returns[b] - returns[a]);
-  let k = 0;
-  while (rem > 0) {
-    amounts[idx[k % 50]]++;
-    rem--;
-    k++;
-  }
-  return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
-}
-
-/** Split discretionary capital between #1 and #2 by return (48 names at min). Useful when two moonshots cluster. */
-function buildDualConcentration(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  const top50 = entries.slice(0, 50);
-  const disc = TOTAL_BUDGET - MIN_PER_STOCK * 50;
-  const r0 = Math.max(0.01, top50[0].returnPct);
-  const r1 = Math.max(0.01, top50[1].returnPct);
-  const sumR = r0 + r1;
-  const amounts = top50.map(() => MIN_PER_STOCK);
-  const add0 = Math.floor(disc * (r0 / sumR));
-  const add1 = Math.floor(disc * (r1 / sumR));
-  amounts[0] += add0;
-  amounts[1] += add1;
-  let rem = disc - add0 - add1;
-  while (rem > 0) {
-    amounts[r0 >= r1 ? 0 : 1]++;
-    rem--;
-  }
-  return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
-}
-
 function allocationsForStrategy(name: string, entries: PriceEntry[]): Allocation[] {
   switch (name) {
     case "max_concentrate":
@@ -1427,6 +1360,8 @@ function allocationsForStrategy(name: string, entries: PriceEntry[]): Allocation
       return buildReturnProportional(entries);
     case "dual_concentrate":
       return buildDualConcentration(entries);
+    case "triple_concentrate":
+      return buildTripleConcentration(entries);
     default:
       return buildMaxConcentration(entries);
   }
@@ -1547,6 +1482,41 @@ async function printLeaderboardCli() {
     console.log(`  ${String(r + 1).padStart(4)}  ${(pct >= 0 ? "+" : "") + pct.toFixed(2).padStart(9)}%   ${label}${mine}`);
   }
   console.log(`${"═".repeat(72)}\n`);
+
+  const topPct = enriched[0]?.pct ?? null;
+  const sourishRow = enriched.find(
+    x => String(x.row.team_id ?? x.row.team ?? "").toLowerCase() === "sourish",
+  );
+  const sourishPct = sourishRow?.pct ?? null;
+  let ourRank: number | null = null;
+  let ourPct: number | null = null;
+  let gapFirst: number | null = null;
+  if (teamId) {
+    const idx = enriched.findIndex((x) => String(x.row.team_id ?? x.row.team ?? "") === teamId);
+    if (idx >= 0) {
+      ourRank = idx + 1;
+      ourPct = enriched[idx]!.pct;
+      gapFirst = topPct != null && ourPct != null ? topPct - ourPct : null;
+    }
+  }
+  appendCalaRunLog(DATA_DIR, {
+    phase: "leaderboard",
+    team_id: teamId ?? null,
+    rank: ourRank,
+    our_return_pct: ourPct,
+    top_return_pct: topPct,
+    gap_to_first_pp: gapFirst,
+    leaderboard_rows: enriched.length,
+  });
+  if (sourishPct != null && ourPct != null) {
+    console.log(
+      `  Benchmark "sourish": ${sourishPct >= 0 ? "+" : ""}${sourishPct.toFixed(2)}%  |  your gap vs sourish: ${(sourishPct - ourPct).toFixed(2)} pp`,
+    );
+  } else if (sourishPct != null && teamId && ourPct == null) {
+    console.log(
+      `  Benchmark "sourish": ${sourishPct >= 0 ? "+" : ""}${sourishPct.toFixed(2)}%  (set CALA_TEAM_ID to your team slug to compare)`,
+    );
+  }
 }
 
 async function main() {

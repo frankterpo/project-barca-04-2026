@@ -24,7 +24,14 @@ import {
   type CalaEntityProfile,
   type EntityProjection,
 } from "../lib/cala";
+import { appendCalaRunLog } from "../lib/cala-run-log";
+import {
+  buildReturnProportional,
+  buildTripleConcentration,
+  type CalaPriceEntry,
+} from "../lib/cala-portfolio-math";
 import * as fs from "fs";
+import { join } from "path";
 
 const TOTAL_BUDGET = 1_000_000;
 const MIN_STOCKS = 50;
@@ -34,6 +41,7 @@ const MAX_RETRIES = 3;
 const CONCURRENCY = 2;
 const CACHE_PATH = "data/omnigraph-cache.json";
 const PRICE_DB_PATH = "data/price-db.json";
+const CALA_DATA_DIR = join(process.cwd(), "data");
 
 /** Apr15→eval returns from price-harvester / Convex submit responses (optional). */
 function loadHarvestReturnMap(): Map<string, number> {
@@ -724,84 +732,122 @@ function phase6_allocate(
   const projectedValueFromReturn = (amount: number, returnPct: number) =>
     amount * (1 + returnPct / 100);
 
-  if (harvestReturns && harvestReturns.size > 0) {
-    const harvested = scored
-      .map((company) => ({
-        company,
-        returnPct: harvestReturns.get(company.ticker),
-      }))
-      .filter(
-        (
-          row,
-        ): row is {
-          company: ScoredCompany;
-          returnPct: number;
-        } => typeof row.returnPct === "number",
-      )
+  const scoredByTicker = new Map(scored.map((c) => [c.ticker, c]));
+
+  /** Prefer global price-db rankings so moonshots outside the entity-research universe still drive allocation. */
+  const harvestRowsFromMap = (map: Map<string, number>) =>
+    [...map.entries()]
+      .map(([ticker, returnPct]) => ({ ticker, returnPct }))
       .sort((a, b) => b.returnPct - a.returnPct);
 
-    if (harvested.length >= MIN_STOCKS) {
-      const top50 = harvested.slice(0, MIN_STOCKS);
-      const discretionaryBudget = TOTAL_BUDGET - MIN_PER_STOCK * MIN_STOCKS;
+  const harvestRowsIntersectScored = () => {
+    if (!harvestReturns || harvestReturns.size === 0) return [];
+    return scored
+      .map((company) => ({
+        ticker: company.ticker,
+        returnPct: harvestReturns.get(company.ticker),
+      }))
+      .filter((row): row is { ticker: string; returnPct: number } => typeof row.returnPct === "number")
+      .sort((a, b) => b.returnPct - a.returnPct);
+  };
 
-      const toAllocations = (bonusByIndex: number[], label: string) => {
-        const allocations = top50.map(({ company, returnPct }, idx) => ({
-          ticker: company.ticker,
-          amount: MIN_PER_STOCK + bonusByIndex[idx],
-          reasoning: `[${label}] Harvested Apr15→today return ${returnPct.toFixed(1)}%. ${company.reasoning}`,
-        }));
-        const projectedValue = top50.reduce(
-          (sum, { returnPct }, idx) =>
-            sum + projectedValueFromReturn(allocations[idx].amount, returnPct),
-          0,
-        );
-        return { allocations, projectedValue };
-      };
+  const tryHarvestDrivenAlloc = (
+    rows: { ticker: string; returnPct: number }[],
+    sourceLabel: string,
+  ): { ticker: string; amount: number; reasoning: string }[] | null => {
+    if (rows.length < MIN_STOCKS) return null;
 
-      const maxConcentrationBonus = Array.from({ length: MIN_STOCKS }, (_, idx) =>
-        idx === 0 ? discretionaryBudget : 0,
+    const top50 = rows.slice(0, MIN_STOCKS);
+    const discretionaryBudget = TOTAL_BUDGET - MIN_PER_STOCK * MIN_STOCKS;
+
+    const reasoningFor = (ticker: string, returnPct: number, label: string) => {
+      const company = scoredByTicker.get(ticker);
+      const tail = company?.reasoning ?? "No overlapping entity research row (price-harvest only).";
+      return `[${label}] Harvested Apr15→today return ${returnPct.toFixed(1)}%. ${tail}`;
+    };
+
+    const toAllocations = (amounts: number[], label: string) => {
+      const allocations = top50.map(({ ticker, returnPct }, idx) => ({
+        ticker,
+        amount: amounts[idx],
+        reasoning: reasoningFor(ticker, returnPct, label),
+      }));
+      const projectedValue = top50.reduce(
+        (sum, { returnPct }, idx) => sum + projectedValueFromReturn(allocations[idx].amount, returnPct),
+        0,
       );
+      return { allocations, projectedValue };
+    };
 
-      const top0 = Math.max(0.01, top50[0].returnPct);
-      const top1 = Math.max(0.01, top50[1].returnPct);
-      const dualConcentrationBonus = Array.from({ length: MIN_STOCKS }, () => 0);
-      dualConcentrationBonus[0] = Math.floor(discretionaryBudget * (top0 / (top0 + top1)));
-      dualConcentrationBonus[1] = discretionaryBudget - dualConcentrationBonus[0];
+    const maxConcentrationBonus = Array.from({ length: MIN_STOCKS }, (_, idx) =>
+      idx === 0 ? discretionaryBudget : 0,
+    );
+    const maxAmounts = maxConcentrationBonus.map((b) => MIN_PER_STOCK + b);
 
-      const top5WeightBonus = Array.from({ length: MIN_STOCKS }, () => 0);
-      const top5Returns = top50.slice(0, 5).map(({ returnPct }) => Math.max(0.01, returnPct));
-      const top5ReturnSum = top5Returns.reduce((sum, value) => sum + value, 0) || 1;
-      let allocated = 0;
-      for (let i = 0; i < top5Returns.length; i++) {
-        const add = Math.floor(discretionaryBudget * (top5Returns[i] / top5ReturnSum));
-        top5WeightBonus[i] = add;
-        allocated += add;
-      }
-      top5WeightBonus[0] += discretionaryBudget - allocated;
+    const top0 = Math.max(0.01, top50[0].returnPct);
+    const top1 = Math.max(0.01, top50[1].returnPct);
+    const dualConcentrationBonus = Array.from({ length: MIN_STOCKS }, () => 0);
+    dualConcentrationBonus[0] = Math.floor(discretionaryBudget * (top0 / (top0 + top1)));
+    dualConcentrationBonus[1] = discretionaryBudget - dualConcentrationBonus[0];
+    const dualAmounts = dualConcentrationBonus.map((b) => MIN_PER_STOCK + b);
 
-      const candidates = [
-        toAllocations(maxConcentrationBonus, "max_concentrate"),
-        toAllocations(dualConcentrationBonus, "dual_concentrate"),
-        toAllocations(top5WeightBonus, "top5_weighted"),
-      ];
-
-      const best = candidates.reduce((winner, candidate) =>
-        candidate.projectedValue > winner.projectedValue ? candidate : winner,
-      );
-
-      console.log(
-        `  Harvest-driven mode: ${top50.length} known-return tickers, projected $${best.projectedValue.toLocaleString(undefined, {
-          maximumFractionDigits: 0,
-        })}`,
-      );
-      console.log(
-        `  Top 5: ${best.allocations
-          .slice(0, 5)
-          .map((a) => `${a.ticker}=$${a.amount.toLocaleString()}`)
-          .join(", ")}`,
-      );
-      return best.allocations;
+    const top5WeightBonus = Array.from({ length: MIN_STOCKS }, () => 0);
+    const top5Returns = top50.slice(0, 5).map(({ returnPct }) => Math.max(0.01, returnPct));
+    const top5ReturnSum = top5Returns.reduce((sum, value) => sum + value, 0) || 1;
+    let allocated = 0;
+    for (let i = 0; i < top5Returns.length; i++) {
+      const add = Math.floor(discretionaryBudget * (top5Returns[i] / top5ReturnSum));
+      top5WeightBonus[i] = add;
+      allocated += add;
     }
+    top5WeightBonus[0] += discretionaryBudget - allocated;
+    const top5Amounts = top5WeightBonus.map((b) => MIN_PER_STOCK + b);
+
+    const stubEntries: CalaPriceEntry[] = top50.map((r) => ({
+      ticker: r.ticker,
+      purchasePrice: 1,
+      evalPrice: 1,
+      returnPct: r.returnPct,
+    }));
+    const proportionalAllocs = buildReturnProportional(stubEntries);
+    const propAmounts = proportionalAllocs.map((a) => a.amount);
+    const tripleAllocs = buildTripleConcentration(stubEntries);
+    const tripleAmounts = tripleAllocs.map((a) => a.amount);
+
+    const candidates = [
+      toAllocations(maxAmounts, "max_concentrate"),
+      toAllocations(dualAmounts, "dual_concentrate"),
+      toAllocations(tripleAmounts, "triple_concentrate"),
+      toAllocations(top5Amounts, "top5_weighted"),
+      toAllocations(propAmounts, "return_proportional"),
+    ];
+
+    const best = candidates.reduce((winner, candidate) =>
+      candidate.projectedValue > winner.projectedValue ? candidate : winner,
+    );
+
+    console.log(
+      `  Harvest-driven mode (${sourceLabel}): ${top50.length} tickers, best candidate projected $${best.projectedValue.toLocaleString(undefined, {
+        maximumFractionDigits: 0,
+      })}`,
+    );
+    console.log(
+      `  Top 5: ${best.allocations
+        .slice(0, 5)
+        .map((a) => `${a.ticker}=$${a.amount.toLocaleString()}`)
+        .join(", ")}`,
+    );
+    return best.allocations;
+  };
+
+  if (harvestReturns && harvestReturns.size >= MIN_STOCKS) {
+    const global = tryHarvestDrivenAlloc(harvestRowsFromMap(harvestReturns), "global price-db");
+    if (global) return global;
+  }
+
+  if (harvestReturns && harvestReturns.size > 0) {
+    const intersect = tryHarvestDrivenAlloc(harvestRowsIntersectScored(), "intersection with researched entities");
+    if (intersect) return intersect;
   }
 
   const selected = scored.slice(0, Math.min(scored.length, MIN_STOCKS));
@@ -879,7 +925,14 @@ async function phase7_submit(
       DEFAULT_CONVEX_FETCH_MS,
     );
   } catch (e) {
-    console.error("  ❌ Submission failed:", e instanceof Error ? e.message : String(e));
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("  ❌ Submission failed:", msg);
+    appendCalaRunLog(CALA_DATA_DIR, {
+      phase: "research_submit_failed",
+      team_id: teamId,
+      model_agent_version: version,
+      error_message: msg,
+    });
     return null;
   }
 
@@ -891,11 +944,22 @@ async function phase7_submit(
   console.log("  ✅ SUBMISSION SUCCESSFUL!");
   if (parsed.submission_id) console.log(`  Submission ID: ${parsed.submission_id}`);
   if (parsed.total_invested) console.log(`  Invested: $${parsed.total_invested.toLocaleString()}`);
+  let submitReturnPct: number | null = null;
   if (parsed.total_value && parsed.total_invested) {
     console.log(`  Value: $${parsed.total_value.toLocaleString()}`);
     const ret = ((parsed.total_value - parsed.total_invested) / parsed.total_invested) * 100;
+    submitReturnPct = ret;
     console.log(`  Return: ${ret > 0 ? "+" : ""}${ret.toFixed(2)}%`);
   }
+
+  appendCalaRunLog(CALA_DATA_DIR, {
+    phase: "research_submit",
+    team_id: teamId,
+    model_agent_version: version,
+    submit_return_pct: submitReturnPct,
+    actual_total_value_usd: parsed.total_value ?? null,
+    actual_invested_usd: parsed.total_invested ?? null,
+  });
 
   return parsed;
 }
