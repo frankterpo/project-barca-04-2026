@@ -97,18 +97,30 @@ export function TradingDashboard() {
   const [error, setError] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement>(null);
 
-  const fetchLeaderboard = useCallback(async () => {
-    try {
-      const res = await fetch("/api/leaderboard");
-      const json = await res.json();
-      if (json.ok && Array.isArray(json.rows)) {
-        setRows(json.rows);
-        setError(null);
-      } else {
-        setError(json.error || "Failed to load leaderboard");
+  const fetchLeaderboard = useCallback(async (retries = 2) => {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch("/api/leaderboard");
+        const json = await res.json();
+        if (json.ok && Array.isArray(json.rows)) {
+          setRows(json.rows);
+          setError(null);
+          setLastRefresh(new Date());
+          setLoading(false);
+          return;
+        }
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        setError(json.error || "Leaderboard unreachable");
+      } catch (e) {
+        if (attempt < retries) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        setError(e instanceof Error ? e.message : "Network error");
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Network error");
     }
     setLastRefresh(new Date());
     setLoading(false);
@@ -344,7 +356,17 @@ export function TradingDashboard() {
             </div>
             <div ref={logRef} className="max-h-80 overflow-y-auto p-3 font-mono text-xs text-text-secondary leading-relaxed">
               {harvestLog.map((line, i) => (
-                <div key={i} className={line.includes("ERROR") || line.includes("fail") || line.includes("[error]") ? "text-negative" : line.includes("submit") || line.includes("BEST") || line.includes("[done]") ? "text-positive" : line.includes("[stderr]") ? "text-warning" : ""}>
+                <div key={i} className={
+                  line.includes("[error]") || line.includes("ERROR") || line.includes("fail")
+                    ? "text-negative"
+                    : line.includes("Run locally:") || line.includes("pnpm tsx")
+                      ? "text-accent font-semibold"
+                      : line.includes("submit") || line.includes("BEST") || line.includes("[done]")
+                        ? "text-positive"
+                        : line.includes("[stderr]")
+                          ? "text-warning"
+                          : ""
+                }>
                   {line}
                 </div>
               ))}

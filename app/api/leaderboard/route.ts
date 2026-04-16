@@ -18,7 +18,7 @@ interface ConvexRow {
   teamLogoUrl?: string | null;
 }
 
-export async function GET() {
+async function fetchConvex(attempt = 0): Promise<{ ok: boolean; value?: unknown[]; error?: string }> {
   try {
     const res = await fetch(CONVEX_CLOUD_URL, {
       method: "POST",
@@ -26,17 +26,37 @@ export async function GET() {
       body: JSON.stringify({ path: "submissions:leaderboard", args: {} }),
       signal: AbortSignal.timeout(10_000),
     });
-
     const json = await res.json();
-
-    if (json.status !== "success" || !Array.isArray(json.value)) {
-      return NextResponse.json(
-        { ok: false, rows: [], error: json.errorMessage ?? "Convex query failed" },
-        { status: 502 },
-      );
+    if (json.status === "success" && Array.isArray(json.value)) {
+      return { ok: true, value: json.value };
     }
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      return fetchConvex(attempt + 1);
+    }
+    return { ok: false, error: json.errorMessage ?? "Convex query failed" };
+  } catch (err) {
+    if (attempt < 2) {
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      return fetchConvex(attempt + 1);
+    }
+    return { ok: false, error: err instanceof Error ? err.message : "Unknown error" };
+  }
+}
 
-    const rows = (json.value as ConvexRow[]).map((r) => {
+export async function GET() {
+  const result = await fetchConvex();
+
+  if (!result.ok || !result.value) {
+    return NextResponse.json(
+      { ok: false, rows: [], error: result.error ?? "Convex unreachable after 3 attempts" },
+      { status: 502 },
+    );
+  }
+
+  try {
+
+    const rows = (result.value as ConvexRow[]).map((r) => {
       const invested = r.totalInvested ?? INITIAL_INVESTMENT;
       const value = r.totalValue ?? invested;
       const returnPct = invested > 0 ? ((value - invested) / invested) * 100 : 0;
