@@ -43,3 +43,6 @@ yarn-error.log*
 # Lobster IC generated fixtures (demo:seed)
 data/
 .vercel
+
+# gstack QA reports (local only)
+.gstack/
