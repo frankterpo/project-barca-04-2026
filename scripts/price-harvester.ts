@@ -1098,14 +1098,20 @@ function showRankings(db: PriceDB) {
   console.log(`\n${"═".repeat(70)}`);
   console.log(`  TOP PERFORMERS (Apr 15 2025 → Today)`);
   console.log(`${"═".repeat(70)}`);
-  console.log(`  ${"Rank".padEnd(6)} ${"Ticker".padEnd(8)} ${"Buy Price".padStart(12)} ${"Now".padStart(12)} ${"Return".padStart(12)}`);
-  console.log(`  ${"-".repeat(60)}`);
+  const fmtPrice = (v: number) => {
+    if (v < 0.001) return v.toExponential(2);
+    if (v < 1) return v.toFixed(4);
+    return v.toFixed(2);
+  };
+
+  console.log(`  ${"Rank".padEnd(6)} ${"Ticker".padEnd(8)} ${"Buy Price".padStart(14)} ${"Now".padStart(14)} ${"Return".padStart(12)}`);
+  console.log(`  ${"-".repeat(64)}`);
 
   for (let i = 0; i < Math.min(60, entries.length); i++) {
     const e = entries[i];
     const sign = e.returnPct >= 0 ? "+" : "";
     console.log(
-      `  ${String(i + 1).padEnd(6)} ${e.ticker.padEnd(8)} $${e.purchasePrice.toFixed(2).padStart(11)} $${e.evalPrice.toFixed(2).padStart(11)} ${sign}${e.returnPct.toFixed(1)}%`.padStart(11),
+      `  ${String(i + 1).padEnd(6)} ${e.ticker.padEnd(8)} $${fmtPrice(e.purchasePrice).padStart(13)} $${fmtPrice(e.evalPrice).padStart(13)} ${sign}${e.returnPct.toFixed(1)}%`,
     );
   }
 
@@ -1115,7 +1121,7 @@ function showRankings(db: PriceDB) {
     const e = worst[i];
     const sign = e.returnPct >= 0 ? "+" : "";
     console.log(
-      `  ${String(i + 1).padEnd(6)} ${e.ticker.padEnd(8)} $${e.purchasePrice.toFixed(2).padStart(11)} $${e.evalPrice.toFixed(2).padStart(11)} ${sign}${e.returnPct.toFixed(1)}%`.padStart(11),
+      `  ${String(i + 1).padEnd(6)} ${e.ticker.padEnd(8)} $${fmtPrice(e.purchasePrice).padStart(13)} $${fmtPrice(e.evalPrice).padStart(13)} ${sign}${e.returnPct.toFixed(1)}%`,
     );
   }
 }

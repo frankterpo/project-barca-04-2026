@@ -126,18 +126,49 @@ export function TradingDashboard() {
     setHarvestLog(["Launching price harvester..."]);
 
     try {
-      const res = await fetch("/api/harvest/trigger", { method: "POST" });
-      const json = await res.json();
-      if (json.ok) {
-        setHarvestLog(json.output || ["Harvest complete."]);
-        setHarvest("done");
-        fetchLeaderboard();
-      } else {
-        setHarvestLog(json.output || [json.error || "Harvest failed."]);
+      const res = await fetch("/api/harvest/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "auto" }),
+      });
+
+      if (!res.body) {
+        setHarvestLog(["No streaming response"]);
         setHarvest("error");
+        return;
       }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const msg = JSON.parse(line.slice(6));
+              setHarvestLog((prev) => [...prev, msg]);
+              if (typeof msg === "string" && msg.startsWith("[done]")) {
+                const success = msg.includes("code 0");
+                setHarvest(success ? "done" : "error");
+                fetchLeaderboard();
+              }
+            } catch {}
+          }
+        }
+      }
+
+      setHarvest((s) => (s === "running" ? "done" : s));
+      fetchLeaderboard();
     } catch (e) {
-      setHarvestLog([e instanceof Error ? e.message : "Network error"]);
+      setHarvestLog((prev) => [...prev, e instanceof Error ? e.message : "Network error"]);
       setHarvest("error");
     }
   }, [harvest, fetchLeaderboard]);
@@ -311,9 +342,9 @@ export function TradingDashboard() {
                 </div>
               )}
             </div>
-            <div ref={logRef} className="max-h-48 overflow-y-auto p-3 font-mono text-xs text-text-secondary leading-relaxed">
+            <div ref={logRef} className="max-h-80 overflow-y-auto p-3 font-mono text-xs text-text-secondary leading-relaxed">
               {harvestLog.map((line, i) => (
-                <div key={i} className={line.includes("ERROR") || line.includes("fail") ? "text-negative" : line.includes("submit") || line.includes("BEST") ? "text-positive" : ""}>
+                <div key={i} className={line.includes("ERROR") || line.includes("fail") || line.includes("[error]") ? "text-negative" : line.includes("submit") || line.includes("BEST") || line.includes("[done]") ? "text-positive" : line.includes("[stderr]") ? "text-warning" : ""}>
                   {line}
                 </div>
               ))}

@@ -1,44 +1,63 @@
 import { NextResponse } from "next/server";
-import { exec } from "child_process";
+import { exec, type ChildProcess } from "child_process";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-export async function POST() {
+export async function POST(req: Request) {
+  const body = await req.json().catch(() => ({}));
+  const mode = body.mode === "auto" ? "--auto" : "--harvest";
   const startMs = Date.now();
 
-  return new Promise<NextResponse>((resolve) => {
-    const child = exec(
-      "npx tsx scripts/price-harvester.ts 2>&1",
-      { timeout: 280_000, maxBuffer: 5 * 1024 * 1024, cwd: process.cwd() },
-      (error, stdout, stderr) => {
-        const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
-        const output = (stdout || "") + (stderr || "");
-        const lines = output.split("\n").filter(Boolean);
-        const lastLines = lines.slice(-30);
+  const encoder = new TextEncoder();
+  let child: ChildProcess | null = null;
 
-        if (error) {
-          resolve(
-            NextResponse.json({
-              ok: false,
-              elapsed_s: elapsed,
-              error: error.message,
-              output: lastLines,
-            }, { status: 500 }),
-          );
-          return;
+  const stream = new ReadableStream({
+    start(controller) {
+      const send = (data: string) => {
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch {}
+      };
+
+      send(`[${new Date().toISOString()}] Starting price-harvester ${mode}...`);
+
+      child = exec(
+        `npx tsx scripts/price-harvester.ts ${mode} 2>&1`,
+        { timeout: 280_000, maxBuffer: 10 * 1024 * 1024, cwd: process.cwd() },
+      );
+
+      child.stdout?.on("data", (chunk: string) => {
+        for (const line of chunk.split("\n")) {
+          if (line.trim()) send(line);
         }
+      });
 
-        resolve(
-          NextResponse.json({
-            ok: true,
-            elapsed_s: elapsed,
-            output: lastLines,
-          }),
-        );
-      },
-    );
+      child.stderr?.on("data", (chunk: string) => {
+        for (const line of chunk.split("\n")) {
+          if (line.trim()) send(`[stderr] ${line}`);
+        }
+      });
 
-    child.unref?.();
+      child.on("close", (code) => {
+        const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+        send(`[done] Process exited with code ${code} in ${elapsed}s`);
+        try { controller.close(); } catch {}
+      });
+
+      child.on("error", (err) => {
+        send(`[error] ${err.message}`);
+        try { controller.close(); } catch {}
+      });
+    },
+    cancel() {
+      child?.kill();
+    },
+  });
+
+  return new NextResponse(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
   });
 }
