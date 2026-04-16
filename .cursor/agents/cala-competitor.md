@@ -30,6 +30,10 @@ The submission API (`POST https://different-cormorant-663.convex.site/api/submit
 | `scripts/price-harvester.ts` | Main harvester script with ALL_TICKERS universe and allocation strategies |
 | `.env` | CALA_API_KEY, CALA_TEAM_ID |
 
+## Supabase persistence (optional)
+
+Set **`SUPABASE_CONNECTION`** to your Supabase Postgres URI (pooler). Every `appendCalaRunLog` event (harvest, optimize, leaderboard, research, failures) inserts a row into **`runs`**. **`--harvest`** and post-submit **`--optimize`** also upsert **`prices`**. Successful live optimize submits attach **`run_holdings`**. Set **`CALA_SUPABASE_SYNC=0`** to disable. Schema must match `lib/supabase.ts` (`runs` columns beyond `id`/`phase`).
+
 ## gstack Skills — Use Actively
 
 Read skills from `.agents/skills/gstack/` before using:

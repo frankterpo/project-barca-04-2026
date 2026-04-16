@@ -40,14 +40,18 @@ import {
   validateAllocationsError as validateAllocations,
 } from "@/lib/cala-portfolio-math";
 import {
+  type BadTickerEntry,
   buildHarvestUniverse,
   loadHarvestCandidateFiles,
+  parseBadTickerFile,
   priceDbAgeHours,
+  retryableBadTickers,
+  serializeBadTickerFile,
   splitHarvestUniverse,
 } from "@/lib/cala-ticker-universe";
 
 type Allocation = CalaAllocationRow;
-type PriceEntry = CalaPriceEntry;
+type PriceEntry = CalaPriceEntry & { lastHarvestedAt?: string };
 type PortfolioAudit = CalaPortfolioAudit;
 import { getOmnigraphClient, probeOmnigraphHealth } from "@/lib/omnigraph/client";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "fs";
@@ -91,6 +95,10 @@ const DATA_DIR = resolveDataDir();
 const PRICE_DB_PATH = join(DATA_DIR, "price-db.json");
 const BAD_TICKERS_PATH = join(DATA_DIR, "bad-tickers.json");
 
+function schedulePriceDbSupabaseSync(db: PriceDB): void {
+  void import("@/lib/cala-supabase-sync").then((m) => m.syncPriceDbToSupabase(db.prices));
+}
+
 interface PriceDB {
   lastUpdated: string;
   prices: Record<string, PriceEntry>;
@@ -124,17 +132,21 @@ function maybeWarnStalePriceDb(db: PriceDB) {
   );
 }
 
+let badTickerEntries: BadTickerEntry[] = parseBadTickerFile(BAD_TICKERS_PATH);
+
 function loadPersistedBadTickers(): string[] {
-  try {
-    if (existsSync(BAD_TICKERS_PATH)) {
-      return JSON.parse(readFileSync(BAD_TICKERS_PATH, "utf-8"));
-    }
-  } catch { /* ignore corrupt file */ }
-  return [];
+  return badTickerEntries.map((e) => e.ticker);
 }
 
 function savePersistedBadTickers(tickers: Set<string>) {
-  writeFileSync(BAD_TICKERS_PATH, JSON.stringify([...tickers].sort(), null, 2));
+  const now = new Date().toISOString();
+  const existing = new Map(badTickerEntries.map((e) => [e.ticker, e]));
+  const merged: BadTickerEntry[] = [...tickers].map((t) =>
+    existing.get(t) ?? { ticker: t, failedAt: now },
+  );
+  badTickerEntries = merged;
+  serializeBadTickerFile(BAD_TICKERS_PATH, merged);
+  void import("@/lib/cala-supabase-sync").then((m) => m.syncBadTickersToSupabase(tickers));
 }
 
 async function fetchJsonWithTimeout<T>(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<T> {
@@ -876,6 +888,36 @@ const ALL_TICKERS = [
   "JZ", "LITM", "NIO", "LI", "XPEV",
   "CPOP", "AIXI", "NISN", "WISA", "CXDO",
   "RCAT", "UMAC", "BRLT",   "UTME", "EZGO",
+
+  // === WAVE 8: TICKER CHANGES 2026 — new tickers (API may return old co's Apr 2025 price) ===
+  "ZTG", "YOOV", "SDEV", "KEEL", "CSHR", "NEXR", "XNDU", "CYAB",
+  "GLND", "MRLN", "GIX", "VIVO", "FNUC", "QUCY", "GRML", "GMEX",
+  "DMRA", "FLNA", "OIO", "FRMM", "NXTS", "ALOY", "RYZ", "CVSA",
+  "XRN", "GGRP", "ARIS", "CNTN", "AIOS", "RPC", "DFNS", "DCH",
+  "TULP", "ZSTK", "QTI", "EZRA", "GPGI", "OLOX", "PDC", "DCBG", "RMIX",
+
+  // === WAVE 8: TICKER CHANGES 2025 — new tickers ===
+  "ABXL", "ABX", "OPLN", "BVC", "HTT", "RENX", "DTCX", "FEED",
+  "TWAV", "TJGC", "DCX", "AMCI", "XXI", "AGIG", "GRDX", "MBAI",
+  "RJET", "OSG", "OPTU", "AIXC", "TDAY", "FWDI", "CYPH", "CD",
+  "AVX", "PTN", "HERE", "XWIN", "AXIA", "FTW", "EMBJ", "ALPS",
+  "NBP", "IMSR", "BYAH", "GIW", "NUCL", "SLAI", "AURE", "NKLR", "BNKK",
+
+  // === WAVE 8: OLD tickers from changes (may still have API data) ===
+  "CIGL", "NBY", "VCIC", "JFBR", "CHAC", "TBMC", "PELI", "BACQ",
+  "VVPR", "MYNZ", "KLTO", "FTEL", "GLTO", "SAVA", "ESGL", "GMGI",
+  "ETHZ", "BLBX", "ATGE", "GMRE", "VRAR", "ARMN", "THAR", "NUKK",
+  "FLGC", "CMPO", "SGBX", "ELWS", "KAR", "STEC", "QD", "SGD",
+  "NAOV", "MCTR", "CJET", "CEP", "HUSA", "AMRK", "ENTO", "CHEK",
+  "MESA", "AMBC", "ATUS", "QLGN", "GCI", "LPTX", "MFH", "AGRI",
+  "PTNT", "QSG", "NVFY", "EBR", "EQV", "GLLI", "IMAB", "HOND",
+  "PHH", "SVII", "BTCM", "PWM", "GSRT", "SHOT",
+
+  // === WAVE 8: UPLISTED FROM OTC TO NASDAQ ===
+  "GOAI", "ELPW",
+
+  // === WAVE 8: SPAC de-SPAC mergers with ticker changes ===
+  "HYAC", "GIXXU", "GIWWU",
 ];
 
 /** Optional: merge tickers from research-agent (`data/research-harvest-candidates.json`) and CALA_HARVEST_CANDIDATE_FILES. */
@@ -1088,13 +1130,14 @@ async function submitAndHarvest(
     console.log(`   ✅ Portfolio: $${totalValue?.toLocaleString()} (${returnPct > 0 ? "+" : ""}${returnPct.toFixed(2)}%)`);
 
     let newCount = 0;
+    const harvestTs = new Date().toISOString();
     for (const ticker of Object.keys(purchasePrices)) {
       const pp = purchasePrices[ticker];
       const ep = evalPrices[ticker];
       if (pp && ep) {
         const ret = ((ep - pp) / pp) * 100;
         const isNew = !db.prices[ticker];
-        db.prices[ticker] = { ticker, purchasePrice: pp, evalPrice: ep, returnPct: ret };
+        db.prices[ticker] = { ticker, purchasePrice: pp, evalPrice: ep, returnPct: ret, lastHarvestedAt: harvestTs };
         if (isNew) newCount++;
       }
     }
@@ -1165,6 +1208,7 @@ async function harvest() {
       harvest_new_prices: 0,
       harvest_elapsed_s: 0,
     });
+    schedulePriceDbSupabaseSync(db);
     return;
   }
 
@@ -1225,6 +1269,7 @@ async function harvest() {
     harvest_new_prices: totalNew,
     harvest_elapsed_s: Number(elapsed),
   });
+  schedulePriceDbSupabaseSync(db);
   showRankings(db);
 }
 
@@ -1444,17 +1489,26 @@ async function optimize(dryRun: boolean) {
   const invested = result.total_invested as number;
   const ret = ((value - invested) / invested) * 100;
   console.log(`   ✅ ACTUAL: $${value?.toLocaleString()} (${ret > 0 ? "+" : ""}${ret.toFixed(2)}%)`);
-  appendCalaRunLog(DATA_DIR, {
-    phase: "optimize_submit",
-    team_id: teamId,
-    best_strategy: bestStrategy.name,
-    submit_return_pct: ret,
-    projected_value_usd: bestProjected,
-    projected_return_pct: bestProjectedReturn,
-    actual_total_value_usd: value,
-    actual_invested_usd: invested,
-    price_db_count: entries.length,
-  });
+  appendCalaRunLog(
+    DATA_DIR,
+    {
+      phase: "optimize_submit",
+      team_id: teamId,
+      best_strategy: bestStrategy.name,
+      submit_return_pct: ret,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      actual_total_value_usd: value,
+      actual_invested_usd: invested,
+      price_db_count: entries.length,
+    },
+    {
+      holdings: bestStrategy.allocs.map((a) => ({
+        ticker: a.nasdaq_code,
+        amount: a.amount,
+      })),
+    },
+  );
 
   // Reconcile submit return vs leaderboard row (debug drift / timing)
   try {
@@ -1535,6 +1589,7 @@ async function optimize(dryRun: boolean) {
     }
   }
   savePriceDB(db);
+  schedulePriceDbSupabaseSync(db);
 
   const runId = `${bestStrategy.name}_${Date.now()}`;
   syncPortfolioRunToOmnigraph(runId, bestStrategy.name, value, ret, bestStrategy.allocs, db);
@@ -1695,6 +1750,22 @@ async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
 
+  if (args.includes("--retry-bad")) {
+    const hoursArg = args.find(a => a.startsWith("--retry-bad-hours="));
+    const hours = hoursArg ? Number(hoursArg.split("=")[1]) : 0;
+    const retryable = retryableBadTickers(badTickerEntries, hours);
+    if (retryable.length === 0) {
+      console.log("No retryable bad tickers found.");
+    } else {
+      console.log(`♻️  Re-enabling ${retryable.length} bad ticker(s) for retry (failed >${hours}h ago):`);
+      console.log(`   ${retryable.join(", ")}`);
+      for (const t of retryable) badTickers.delete(t);
+      badTickerEntries = badTickerEntries.filter((e) => !retryable.includes(e.ticker));
+      serializeBadTickerFile(BAD_TICKERS_PATH, badTickerEntries);
+    }
+    if (!args.includes("--harvest")) return;
+  }
+
   if (args.includes("--harvest")) {
     await harvest();
   } else if (args.includes("--optimize")) {
@@ -1716,6 +1787,8 @@ async function main() {
     console.log("  --show       Show cached rankings");
     console.log("  --leaderboard  Print live scoreboard (sorted by return)");
     console.log("  --auto       Continuous loop: harvest → optimize → repeat");
+    console.log("  --retry-bad  Re-enable all bad tickers for retry (combine with --harvest)");
+    console.log("  --retry-bad --retry-bad-hours=N  Only retry tickers that failed >N hours ago");
     console.log(
       "  Env: CALA_LEADERBOARD_URL, CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL; CALA_ALLOW_SUBMIT=1 for live --optimize POST",
     );

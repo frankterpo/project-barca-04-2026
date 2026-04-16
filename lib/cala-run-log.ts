@@ -72,9 +72,27 @@ function isRunLogEntry(x: unknown): x is CalaRunLogEntry {
   );
 }
 
-/** Append one line to `dataDir/cala-run-log.jsonl`. Never throws. */
-export function appendCalaRunLog(dataDir: string, entry: CalaRunLogEntry): void {
-  if (!calaRunLoggingEnabled()) return;
+export type AppendCalaRunLogOptions = {
+  /** Stored in `run_holdings` when phase is `optimize_submit` and Supabase sync is enabled. */
+  holdings?: Array<{ ticker: string; amount: number }>;
+};
+
+/** Append one line to `dataDir/cala-run-log.jsonl`. Never throws.
+ * When `SUPABASE_CONNECTION` is set and `CALA_SUPABASE_SYNC` is not `0`, also inserts into `runs` (+ holdings for optimize submits).
+ */
+export function appendCalaRunLog(
+  dataDir: string,
+  entry: CalaRunLogEntry,
+  options?: AppendCalaRunLogOptions,
+): void {
+  if (!calaRunLoggingEnabled()) {
+    if (process.env.CALA_SUPABASE_SYNC !== "0" && isRunLogEntry(entry)) {
+      void import("./cala-supabase-sync").then(({ persistCalaRunToSupabase }) =>
+        persistCalaRunToSupabase(entry, options?.holdings),
+      );
+    }
+    return;
+  }
   if (typeof dataDir !== "string" || dataDir.length === 0 || !isRunLogEntry(entry)) {
     return;
   }
@@ -86,5 +104,10 @@ export function appendCalaRunLog(dataDir: string, entry: CalaRunLogEntry): void 
     appendFileSync(logFile, line, "utf8");
   } catch {
     /* never break harvest / optimize */
+  }
+  if (process.env.CALA_SUPABASE_SYNC !== "0") {
+    void import("./cala-supabase-sync").then(({ persistCalaRunToSupabase }) =>
+      persistCalaRunToSupabase(entry, options?.holdings),
+    );
   }
 }

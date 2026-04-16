@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  type BadTickerEntry,
   buildHarvestUniverse,
   isLikelyCalaNasdaqListedSymbol,
   isPriceDbStale,
   normalizeCalaTickerSymbol,
+  parseBadTickerFile,
   priceDbAgeHours,
+  retryableBadTickers,
   splitHarvestUniverse,
 } from "./cala-ticker-universe";
 
@@ -50,5 +53,28 @@ describe("price DB staleness", () => {
     const old = new Date(Date.now() - 100 * 3600 * 1000).toISOString();
     expect(isPriceDbStale(old, 48)).toBe(true);
     expect(priceDbAgeHours(old)).toBeGreaterThan(90);
+  });
+});
+
+describe("parseBadTickerFile", () => {
+  it("returns empty array for non-existent path", () => {
+    expect(parseBadTickerFile("/tmp/__nonexistent_bad_tickers__.json")).toEqual([]);
+  });
+});
+
+describe("retryableBadTickers", () => {
+  const old: BadTickerEntry = { ticker: "FOO", failedAt: new Date(Date.now() - 50 * 3600 * 1000).toISOString() };
+  const recent: BadTickerEntry = { ticker: "BAR", failedAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString() };
+
+  it("returns all when olderThanHours <= 0", () => {
+    expect(retryableBadTickers([old, recent], 0)).toEqual(["FOO", "BAR"]);
+  });
+
+  it("filters by age threshold", () => {
+    expect(retryableBadTickers([old, recent], 24)).toEqual(["FOO"]);
+  });
+
+  it("returns empty when all are recent", () => {
+    expect(retryableBadTickers([recent], 24)).toEqual([]);
   });
 });

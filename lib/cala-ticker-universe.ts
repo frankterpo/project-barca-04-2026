@@ -3,7 +3,7 @@
  * (OTC suffixes, >5 chars, dots), merge optional candidate files with provenance.
  */
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 
 /**
@@ -107,6 +107,70 @@ export function loadHarvestCandidateFiles(paths: string[], cwd = process.cwd()):
   }
   return out;
 }
+
+// ── Timestamped bad-ticker persistence ──────────────────────────────
+
+export interface BadTickerEntry {
+  ticker: string;
+  failedAt: string;
+  reason?: string;
+}
+
+/**
+ * Read bad-tickers file. Handles both legacy (string[]) and timestamped
+ * (BadTickerEntry[]) formats gracefully.
+ */
+export function parseBadTickerFile(absPath: string): BadTickerEntry[] {
+  try {
+    if (!existsSync(absPath)) return [];
+    const raw = JSON.parse(readFileSync(absPath, "utf-8")) as unknown;
+    if (!Array.isArray(raw)) return [];
+    if (raw.length === 0) return [];
+
+    if (typeof raw[0] === "string") {
+      const now = new Date().toISOString();
+      return (raw as string[]).map((t) => ({
+        ticker: t,
+        failedAt: now,
+        reason: "legacy_migration",
+      }));
+    }
+
+    return (raw as BadTickerEntry[]).filter(
+      (e) => typeof e.ticker === "string" && typeof e.failedAt === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function serializeBadTickerFile(
+  absPath: string,
+  entries: BadTickerEntry[],
+): void {
+  const sorted = [...entries].sort((a, b) => a.ticker.localeCompare(b.ticker));
+  writeFileSync(absPath, JSON.stringify(sorted, null, 2));
+}
+
+/**
+ * Return tickers from the bad list that failed more than `olderThanHours` ago
+ * (candidates for retry — transient API errors may have resolved).
+ */
+export function retryableBadTickers(
+  entries: BadTickerEntry[],
+  olderThanHours: number,
+  now = Date.now(),
+): string[] {
+  if (olderThanHours <= 0) return entries.map((e) => e.ticker);
+  return entries
+    .filter((e) => {
+      const age = now - Date.parse(e.failedAt);
+      return Number.isFinite(age) && age > olderThanHours * 3600 * 1000;
+    })
+    .map((e) => e.ticker);
+}
+
+// ── Price DB staleness helpers ──────────────────────────────────────
 
 export function priceDbAgeHours(lastUpdatedIso: string): number | null {
   const t = Date.parse(lastUpdatedIso);

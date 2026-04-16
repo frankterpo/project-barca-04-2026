@@ -14,7 +14,7 @@ export default async function PortfolioPage() {
           role="status"
         >
           <p className="font-medium text-text-primary">No run data found.</p>
-          <p className="mt-2">
+          <p className="mt-4">
             Generate mock fixtures with{" "}
             <code className="rounded bg-bg-muted px-1.5 py-0.5 font-mono text-text-primary">
               pnpm run demo:seed
