@@ -957,6 +957,10 @@ const ALL_TICKERS = [
   // Chinese nano-caps that IPO'd on NASDAQ after April 2025
   "SDM", "TDIC", "EDHL", "DRCT", "BAOS", "VSME",
 
+  // === WAVE 10: CRITICAL — AWIN (AERWINS Technologies) 13,119,900% on NASDAQ ===
+  "AWIN",  // $0.0002 → $26.24, NASDAQ-listed, 13 million % gain
+  "HUMA",  // Humacyte, penny biotech
+
   // === WAVE 10: STATMUSE EXTREME MOVERS (53,000%+ in 4 months) ===
   "JNVR",  // Janover Inc, +1,901% since Jan 2025
   "ASST",  // Asset Entities, +840%
