@@ -70,6 +70,11 @@ function toNumOrNull(v: unknown): number | null {
   return null;
 }
 
+/** Cala / price-db keys are uppercase tickers; normalize at all Set/Map boundaries. */
+function normSym(t: string): string {
+  return t.trim().toUpperCase();
+}
+
 const FETCH_TIMEOUT_MS = Number(process.env.CALA_FETCH_TIMEOUT_MS ?? 120_000);
 const HARVEST_RETRY_LIMIT = 10;
 const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
@@ -106,7 +111,15 @@ interface PriceDB {
 
 function loadPriceDB(): PriceDB {
   if (existsSync(PRICE_DB_PATH)) {
-    return JSON.parse(readFileSync(PRICE_DB_PATH, "utf-8"));
+    const raw = JSON.parse(readFileSync(PRICE_DB_PATH, "utf-8")) as PriceDB;
+    const prices: Record<string, PriceEntry> = {};
+    for (const [k, v] of Object.entries(raw.prices ?? {})) {
+      const n = normSym(k);
+      if (!n) continue;
+      const entry = v as PriceEntry;
+      prices[n] = { ...entry, ticker: n };
+    }
+    return { lastUpdated: raw.lastUpdated, prices };
   }
   return { lastUpdated: new Date().toISOString(), prices: {} };
 }
@@ -135,18 +148,23 @@ function maybeWarnStalePriceDb(db: PriceDB) {
 let badTickerEntries: BadTickerEntry[] = parseBadTickerFile(BAD_TICKERS_PATH);
 
 function loadPersistedBadTickers(): string[] {
-  return badTickerEntries.map((e) => e.ticker);
+  return dedup(badTickerEntries.map((e) => e.ticker));
 }
 
 function savePersistedBadTickers(tickers: Set<string>) {
   const now = new Date().toISOString();
-  const existing = new Map(badTickerEntries.map((e) => [e.ticker, e]));
-  const merged: BadTickerEntry[] = [...tickers].map((t) =>
-    existing.get(t) ?? { ticker: t, failedAt: now },
+  const existing = new Map(
+    badTickerEntries.map((e) => {
+      const n = normSym(e.ticker);
+      return [n, { ...e, ticker: n }] as const;
+    }),
   );
+  const merged: BadTickerEntry[] = dedup([...tickers]).map((n) => existing.get(n) ?? { ticker: n, failedAt: now });
   badTickerEntries = merged;
   serializeBadTickerFile(BAD_TICKERS_PATH, merged);
-  void import("@/lib/cala-supabase-sync").then((m) => m.syncBadTickersToSupabase(tickers));
+  void import("@/lib/cala-supabase-sync").then((m) =>
+    m.syncBadTickersToSupabase(new Set(merged.map((e) => e.ticker))),
+  );
 }
 
 async function fetchJsonWithTimeout<T>(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<T> {
