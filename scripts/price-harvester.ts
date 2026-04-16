@@ -33,8 +33,11 @@ const FETCH_TIMEOUT_MS = Number(process.env.CALA_FETCH_TIMEOUT_MS ?? 120_000);
 const HARVEST_RETRY_LIMIT = 10;
 const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
 
+const CONCURRENCY = Number(process.env.CALA_HARVEST_CONCURRENCY ?? 5);
+
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const PRICE_DB_PATH = join(SCRIPT_DIR, "../data/price-db.json");
+const BAD_TICKERS_PATH = join(SCRIPT_DIR, "../data/bad-tickers.json");
 
 interface PriceEntry {
   ticker: string;
@@ -75,6 +78,19 @@ function loadPriceDB(): PriceDB {
 function savePriceDB(db: PriceDB) {
   db.lastUpdated = new Date().toISOString();
   writeFileSync(PRICE_DB_PATH, JSON.stringify(db, null, 2));
+}
+
+function loadPersistedBadTickers(): string[] {
+  try {
+    if (existsSync(BAD_TICKERS_PATH)) {
+      return JSON.parse(readFileSync(BAD_TICKERS_PATH, "utf-8"));
+    }
+  } catch { /* ignore corrupt file */ }
+  return [];
+}
+
+function savePersistedBadTickers(tickers: Set<string>) {
+  writeFileSync(BAD_TICKERS_PATH, JSON.stringify([...tickers].sort(), null, 2));
 }
 
 async function fetchJsonWithTimeout<T>(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<T> {
@@ -649,23 +665,26 @@ function sortPendingForHarvest(pending: string[], universeOrder: string[]): stri
 }
 
 // Observed live rejects from Cala. Keep them out of future retries.
+// Augmented with persisted bad tickers from previous runs.
 const badTickers = new Set<string>([
-  // Confirmed rejects from live harvest runs
   "SDIG", "CBIT", "GOEV", "LAZR",
   "ANSS",
   "SQ", "ATVI", "TWTR", "DIDI", "BABA", "WISH", "CLOV",
   "BGFV", "GENI", "CLVS", "VXRT", "NKLA", "RIDE",
-  // Newly discovered bad tickers
   "MGOL", "MULN", "FFIE", "ELMS", "DWAC",
-  // Bankrupt/delisted EV and SPAC plays
   "WKHS", "SOLO", "HYLN", "ATLIS",
-  // Known OTC / non-NASDAQ (not in CALA system)
   "AFC", "PCELL", "NRGV", "GENM", "HPNN",
   "SXTC", "LIQT", "SFUN", "MFIN", "SLNH", "AIAB", "BTOG", "BTMX",
-  // Merged SPACs
   "COVA",
-  // Additional penny / illiquid harvest failures
   "DATS", "AKRO", "BRSH", "VLTA", "YGTY", "BIOR",
+  "BMNR", "CRCL", "LICY", "COMM", "CFVI", "TYDE", "ATNF", "MKFG",
+  "BGRY", "BTTR", "WISA", "FSR", "VLDR", "EGIO", "LLAP", "TRMR", "LILM", "VIEW",
+  "JAMF", "SWI", "ALTR", "SMAR", "PRMW",
+  "ITCI", "DVAX", "WOLF", "RVNC", "GTHX", "DRRX", "MNMD",
+  "GRNH", "ACCD", "TALKW", "FLGC", "HEXO", "APHA", "DCFC", "ASTR", "RDFN", "IRNT", "VJET",
+  "NIOBF", "LTHM", "PLL", "ALTM", "VERV", "VLTA",
+  "CSSE", "PARA", "DISCA", "VIAC", "LRNG", "TWOU", "APPH", "CYBR", "SCWX", "EVBG",
+  ...loadPersistedBadTickers(),
 ]);
 
 function harvestReplacementCandidates(db: PriceDB, universeOrder: string[]): string[] {
@@ -726,6 +745,8 @@ function extractBadTicker(errorStr: string): string | null {
   if (m) return up(m[1]);
   const m2 = errorStr.match(/Price fetch failed.*?(\b[A-Z]{1,5}\b): Failed/);
   if (m2) return m2[1];
+  const m3 = errorStr.match(/Missing price data for (\w+)/i);
+  if (m3) return up(m3[1]);
   return null;
 }
 
@@ -855,6 +876,7 @@ async function submitAndHarvest(
     if (bads.length > 0 && retryCount < HARVEST_RETRY_LIMIT) {
       console.log(`   ⚠️  Bad ticker(s): ${bads.join(", ")} — removing and retrying`);
       for (const b of bads) badTickers.add(b);
+      savePersistedBadTickers(badTickers);
       const newTickers = use.filter(t => !bads.includes(t));
       while (newTickers.length < MIN_STOCKS) {
         const replacement = harvestReplacementCandidates(db, ALL_TICKERS).find(t => !newTickers.includes(t));
@@ -881,9 +903,9 @@ async function harvest() {
   const chunks = buildHarvestBatches(ALL_TICKERS, db);
 
   console.log(
-    `🌾 Price Harvester — ${unique.length} universe tickers, ${pending.length} pending, ${chunks.length} submit batch(es)`,
+    `🌾 Price Harvester — ${unique.length} universe, ${pending.length} pending, ${chunks.length} batch(es), concurrency=${CONCURRENCY}`,
   );
-  console.log(`   Cached: ${Object.keys(db.prices).length} tickers\n`);
+  console.log(`   Cached: ${Object.keys(db.prices).length} | Bad: ${badTickers.size}\n`);
 
   if (chunks.length === 0) {
     console.log("   Nothing to harvest (all known or blocked). Use --show or expand ALL_TICKERS.");
@@ -892,20 +914,52 @@ async function harvest() {
   }
 
   let totalNew = 0;
-  for (let i = 0; i < chunks.length; i++) {
-    const unknownInBatch = chunks[i].filter(t => !db.prices[t] && !badTickers.has(t));
-    try {
-      console.log(`   Batch ${i}: ${unknownInBatch.length} new tickers (+ padding to 50)`);
-      const newCount = await submitAndHarvest(chunks[i], `harvest_${i}`, db);
-      totalNew += newCount;
-      savePriceDB(db);
-    } catch (err) {
-      console.error(`   ❌ Batch ${i} error: ${(err as Error).message}`);
+  let completed = 0;
+  const t0 = Date.now();
+
+  for (let waveStart = 0; waveStart < chunks.length; waveStart += CONCURRENCY) {
+    const wave = chunks.slice(waveStart, waveStart + CONCURRENCY);
+    const waveIdx = wave.map((_, j) => waveStart + j);
+
+    const elapsed = Date.now() - t0;
+    if (completed > 0) {
+      const perBatch = elapsed / completed;
+      const remaining = (chunks.length - completed) * perBatch / CONCURRENCY;
+      console.log(
+        `\n⏱️  Wave ${Math.floor(waveStart / CONCURRENCY) + 1}/${Math.ceil(chunks.length / CONCURRENCY)} — ${completed}/${chunks.length} done, ~${Math.ceil(remaining / 1000)}s remaining`,
+      );
     }
-    await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+
+    const results = await Promise.allSettled(
+      wave.map(async (chunk, j) => {
+        const idx = waveIdx[j];
+        const unknownInBatch = chunk.filter(t => !db.prices[t] && !badTickers.has(t));
+        console.log(`   [${idx}] ${unknownInBatch.length} new tickers (+ padding to 50)`);
+        await new Promise(r => setTimeout(r, j * 500));
+        return submitAndHarvest(chunk, `harvest_${idx}`, db);
+      }),
+    );
+
+    for (const r of results) {
+      completed++;
+      if (r.status === "fulfilled") {
+        totalNew += r.value;
+      } else {
+        console.error(`   ❌ Batch error: ${r.reason}`);
+      }
+    }
+
+    savePriceDB(db);
+    savePersistedBadTickers(badTickers);
+
+    if (waveStart + CONCURRENCY < chunks.length) {
+      await new Promise(r => setTimeout(r, BATCH_DELAY_MS));
+    }
   }
 
-  console.log(`\n✅ Harvest complete: ${Object.keys(db.prices).length} total prices (${totalNew} new)`);
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
+  console.log(`\n✅ Harvest complete: ${Object.keys(db.prices).length} total prices (${totalNew} new) in ${elapsed}s`);
+  console.log(`   Bad tickers (persisted): ${badTickers.size}`);
   showRankings(db);
 }
 
