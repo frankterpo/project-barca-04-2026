@@ -27,6 +27,10 @@ For the scaffold, you only need `APP_URL` (optional). Real keys land in M2–M4 
 
 **Harvest throughput:** `scripts/price-harvester.ts` orders unknown tickers so **liquid / priority** names fill the first slots in each batch; micro-caps and lottery names follow. Bad symbols from API errors are stripped and batches refilled using the same ordering.
 
+**Price DB = live submit cache (not a quote API):** Each `--harvest` batch POSTs a dummy equal-weight portfolio; the JSON response includes `purchase_prices_apr15` and `eval_prices_today`. Those values are written to `data/price-db.json`. There is no separate “historical quote” endpoint in this flow—**replay vs live** means: stale `price-db.json` reflects an older mark; re-run `--harvest` before `--optimize` if `CALA_PRICE_DB_WARN_STALE_HOURS` warns (default 48h, set `0` to disable).
+
+**Universe quality:** The raw `ALL_TICKERS` list is filtered to **1–5 letter** symbols (drops obvious OTC/long tickers) before harvesting. Optional: `CALA_EXTRA_TICKERS`, `CALA_HARVEST_CANDIDATE_FILES` (JSON `{ "tickers": [...] }`), and by default **`data/research-harvest-candidates.json`** from `scripts/research-agent.ts` is merged when present (`CALA_MERGE_RESEARCH_CANDIDATES=0` to skip). **`CALA_HARVEST_MAX_BATCHES`** caps how many 50-stock waves run (probe mode).
+
 **Live submission:** Portfolio POSTs from `scripts/price-harvester.ts --optimize` (without `--dry-run`) and from `scripts/autonomous-runner.ts` require **`CALA_ALLOW_SUBMIT=1`** when you intentionally want real submits. The autonomous runner also only submits when the scored return beats leaderboard #1; without `CALA_ALLOW_SUBMIT=1` it logs and skips.
 
 **Iteration (Cala / gstack-style):** After each competitor round run `pnpm tsc --noEmit` and `pnpm lint` and fix regressions. For larger design changes, capture decisions in a short `PLAN.md` (or Cursor plan mode) and run `/gstack-plan-eng-review` on it; optional `/review` or `/gstack-review` on the diff before merge.
@@ -63,6 +67,8 @@ Graph API routes:
 Request body for read/change: `{ "query": "<name>", "params": { ... }, "branch": "main" }`.
 
 **Northflank (M4):** set `NORTHFLANK_API_KEY` in `.env`. The key authenticates against the Northflank v1 API (`https://api.northflank.com`). Jobs must already exist on Northflank — the client triggers runs, polls status, and lists history.
+
+**Omnigraph on Northflank:** see `northflank/README.md` for a service + job layout (persistent volume, `OMNIGRAPH_SERVER_BEARER_TOKEN`, internal URL). Trigger the packaged research agent with `pnpm agent:run-remote` after setting `NORTHFLANK_PROJECT_ID` and `NORTHFLANK_RESEARCH_JOB_ID`.
 
 Compute API routes:
 

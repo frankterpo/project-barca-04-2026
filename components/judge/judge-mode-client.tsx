@@ -1,41 +1,64 @@
 "use client";
 
-import { startTransition, useEffect, useState } from "react";
+import { startTransition, useCallback, useEffect, useState } from "react";
 
 import { AnswerPanel } from "@/components/judge/answer-panel";
 import { CompanyPicker } from "@/components/judge/company-picker";
 import { PresetButtons } from "@/components/judge/preset-buttons";
-import { getDefaultRunId } from "@/lib/run-id";
 import type { Holding, JudgeAnswer } from "@/lib/types";
 
 export function JudgeModeClient({
-  holdings,
+  holdings: initialHoldings,
   initialTicker,
 }: {
   holdings: Holding[];
   initialTicker?: string;
 }) {
-  const runId = getDefaultRunId();
+  const [holdings, setHoldings] = useState<Holding[]>(initialHoldings);
+  const [loadingHoldings, setLoadingHoldings] = useState(initialHoldings.length === 0);
+
   const defaultTicker =
     (initialTicker &&
       holdings.some((h) => h.ticker === initialTicker.toUpperCase()) &&
       initialTicker.toUpperCase()) ||
     holdings[0]?.ticker ||
     "";
+
   const [ticker, setTicker] = useState(defaultTicker);
+
+  useEffect(() => {
+    if (initialHoldings.length > 0) return;
+
+    const ctrl = new AbortController();
+    fetch("/api/judge-mode/companies", { signal: ctrl.signal })
+      .then((r) => r.json() as Promise<{ holdings?: Holding[] }>)
+      .then((body) => {
+        if (!ctrl.signal.aborted && body.holdings) {
+          const next = body.holdings!;
+          startTransition(() => {
+            setHoldings(next);
+            setTicker((t) => t || next[0]?.ticker || "");
+          });
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!ctrl.signal.aborted) startTransition(() => setLoadingHoldings(false));
+      });
+
+    return () => ctrl.abort();
+  }, [initialHoldings]);
   const [presetId, setPresetId] = useState<number | null>(1);
   const [answer, setAnswer] = useState<JudgeAnswer | null>(null);
   const [loading, setLoading] = useState(false);
 
-  const displayAnswer = ticker && presetId ? answer : null;
-
-  useEffect(() => {
+  const fetchAnswer = useCallback(() => {
     if (!ticker || !presetId) return;
 
     const ctrl = new AbortController();
     startTransition(() => setLoading(true));
     fetch(
-      `/api/judge-mode?runId=${encodeURIComponent(runId)}&ticker=${encodeURIComponent(ticker)}&presetId=${presetId}`,
+      `/api/judge-mode?ticker=${encodeURIComponent(ticker)}&presetId=${presetId}`,
       { signal: ctrl.signal },
     )
       .then(async (r) => {
@@ -56,7 +79,35 @@ export function JudgeModeClient({
       });
 
     return () => ctrl.abort();
-  }, [ticker, presetId, runId]);
+  }, [ticker, presetId]);
+
+  useEffect(() => {
+    return fetchAnswer();
+  }, [fetchAnswer]);
+
+  const displayAnswer = ticker && presetId ? answer : null;
+
+  if (loadingHoldings) {
+    return (
+      <div className="rounded-lg border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-sm text-text-secondary animate-pulse">
+        Loading companies from Omnigraph...
+      </div>
+    );
+  }
+
+  if (holdings.length === 0) {
+    return (
+      <div
+        className="rounded-lg border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-sm text-text-secondary"
+        role="status"
+      >
+        <p className="font-medium text-text-primary">No holdings available.</p>
+        <p className="mt-2">
+          Run the price harvester to populate Omnigraph, or connect to a running Omnigraph instance.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="grid gap-6 lg:grid-cols-3">

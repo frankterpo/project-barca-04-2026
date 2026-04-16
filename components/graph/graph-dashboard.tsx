@@ -461,9 +461,14 @@ export function GraphDashboard() {
   }
 
   return (
-    <div className="rounded-lg border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-center text-sm text-text-secondary" role="alert">
+    <div
+      className="rounded-lg border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-sm text-text-secondary"
+      role="status"
+    >
       <p className="font-medium text-text-primary">No portfolio data yet</p>
-      <p className="mt-2">Run the price harvester to generate portfolio data, or connect Omnigraph for the full knowledge graph.</p>
+      <p className="mt-4">
+        Run the price harvester to generate portfolio data, or connect Omnigraph for the full knowledge graph.
+      </p>
     </div>
   );
 }

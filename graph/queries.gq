@@ -309,3 +309,49 @@ query all_companies()
     return { $co.ticker, $co.name, $co.sector }
     order { $co.ticker asc }
 }
+
+// ── judge mode queries ───────────────────────────────────────
+
+query judge_answers_for_company($ticker: String)
+  @description("All cached judge answers for a company")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co judged $ja
+    }
+    return { $ja.answer_id, $ja.preset_id, $ja.answer, $ja.dissent }
+    order { $ja.preset_id asc }
+}
+
+query judge_answer_single($ticker: String, $preset_id: I32)
+  @description("A single cached judge answer for a company + preset")
+{
+    match {
+        $co: Company { ticker: $ticker }
+        $co judged $ja { preset_id: $preset_id }
+    }
+    return { $ja.answer_id, $ja.preset_id, $ja.answer, $ja.dissent }
+    limit 1
+}
+
+// ── judge mode mutations ─────────────────────────────────────
+
+query upsert_judge_answer($answer_id: String, $preset_id: I32, $answer: String, $dissent: String)
+  @description("Insert or update a judge answer")
+{
+    insert JudgeAnswer {
+        answer_id: $answer_id,
+        preset_id: $preset_id,
+        answer:    $answer,
+        dissent:   $dissent
+    }
+}
+
+query link_judge_answer($ticker: String, $answer_id: String)
+  @description("Link a company to a judge answer")
+{
+    insert Judged {
+        from: $ticker,
+        to:   $answer_id
+    }
+}

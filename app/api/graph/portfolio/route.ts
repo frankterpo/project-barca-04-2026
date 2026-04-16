@@ -4,6 +4,7 @@ import { join } from "path";
 
 import { getOmnigraphClient, type OmnigraphReadResult } from "@/lib/omnigraph";
 import { probeOmnigraphHealth } from "@/lib/omnigraph/client";
+import { isSupabaseConfigured, getAllPrices } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -108,10 +109,50 @@ function tryLocalPriceDb(): Response | null {
   });
 }
 
+async function trySupabase(): Promise<Response | null> {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const rows = await getAllPrices();
+    if (rows.length === 0) return null;
+
+    const winners = rows.filter((r) => (r.return_pct ?? 0) > 0);
+    const avg = rows.length > 0
+      ? rows.reduce((s, r) => s + (r.return_pct ?? 0), 0) / rows.length
+      : 0;
+
+    return NextResponse.json({
+      ok: true,
+      source: "supabase",
+      lastUpdated: rows[0]?.harvested_at ?? null,
+      totalTickers: rows.length,
+      winnersCount: winners.length,
+      losersCount: rows.length - winners.length,
+      avgReturn: avg,
+      bestPerformer: rows[0] ? { ticker: rows[0].ticker, purchasePrice: rows[0].purchase_price, evalPrice: rows[0].eval_price, returnPct: rows[0].return_pct } : null,
+      worstPerformer: rows[rows.length - 1] ? { ticker: rows[rows.length - 1].ticker, purchasePrice: rows[rows.length - 1].purchase_price, evalPrice: rows[rows.length - 1].eval_price, returnPct: rows[rows.length - 1].return_pct } : null,
+      holdings: rows.map((r) => ({
+        ticker: r.ticker,
+        purchasePrice: r.purchase_price,
+        evalPrice: r.eval_price,
+        returnPct: r.return_pct,
+        quantity: 0,
+        purchaseDate: r.harvested_at,
+      })),
+    });
+  } catch {
+    return null;
+  }
+}
+
 export async function GET() {
   try {
     const ogResponse = await tryOmnigraph().catch(() => null);
     if (ogResponse) return ogResponse;
+  } catch { /* fall through */ }
+
+  try {
+    const sbResponse = await trySupabase();
+    if (sbResponse) return sbResponse;
   } catch { /* fall through */ }
 
   const localResponse = tryLocalPriceDb();

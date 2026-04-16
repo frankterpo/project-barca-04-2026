@@ -1,0 +1,17 @@
+# Local reference matching the Northflank service layout (not used in production as-is).
+# Set OMNIGRAPH_DOCKER_IMAGE to the server image from your Omnigraph install (see omnigraph.dev).
+# Persist graph data on the volume mounted at /data.
+services:
+  omnigraph:
+    image: ${OMNIGRAPH_DOCKER_IMAGE:-ghcr.io/modernrelay/omnigraph-server:latest}
+    ports:
+      - "8080:8080"
+    environment:
+      OMNIGRAPH_SERVER_BEARER_TOKEN: ${OMNIGRAPH_BEARER_TOKEN:-dev-token-change-me}
+    volumes:
+      - omnigraph_data:/data
+    # Override command in your image to point at /data/repo.omni after `omnigraph init`.
+    # command: ["omnigraph-server", "/data/repo.omni", "--bind", "0.0.0.0:8080"]
+
+volumes:
+  omnigraph_data:

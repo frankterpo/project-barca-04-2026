@@ -17,8 +17,42 @@ import {
   fetchCalaLeaderboardRows,
   fetchConvexEndpointJson,
   leaderboardRowReturnPct,
+  leaderboardRowTeamId,
+  summarizeLeaderboardForTeam,
   tryFetchCalaLeaderboardRows,
 } from "@/lib/cala";
+import { appendCalaRunLog } from "@/lib/cala-run-log";
+import {
+  CALA_PORTFOLIO_MIN_STOCKS as MIN_STOCKS,
+  CALA_PORTFOLIO_TOTAL_BUDGET as TOTAL_BUDGET,
+  type CalaAllocationRow,
+  type CalaPortfolioAudit,
+  type CalaPriceEntry,
+  auditAllocations,
+  buildDualConcentration,
+  buildEqualAllocations,
+  buildMaxConcentration,
+  buildReturnProportional,
+  buildTopWeighted,
+  buildTripleConcentration,
+  priceEntriesToLookup,
+  projectedTerminalValueUsd,
+  validateAllocationsError as validateAllocations,
+} from "@/lib/cala-portfolio-math";
+import {
+  type BadTickerEntry,
+  buildHarvestUniverse,
+  loadHarvestCandidateFiles,
+  parseBadTickerFile,
+  priceDbAgeHours,
+  retryableBadTickers,
+  serializeBadTickerFile,
+  splitHarvestUniverse,
+} from "@/lib/cala-ticker-universe";
+
+type Allocation = CalaAllocationRow;
+type PriceEntry = CalaPriceEntry & { lastHarvestedAt?: string };
+type PortfolioAudit = CalaPortfolioAudit;
 import { getOmnigraphClient, probeOmnigraphHealth } from "@/lib/omnigraph/client";
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from "fs";
 import { join } from "path";
@@ -26,11 +60,23 @@ import { join } from "path";
 function submitUrl(): string {
   return calaSubmitUrl();
 }
-const TOTAL_BUDGET = 1_000_000;
-const MIN_PER_STOCK = 5_000;
-const MIN_STOCKS = 50;
+
+function toNumOrNull(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/** Cala / price-db keys are uppercase tickers; normalize at all Set/Map boundaries. */
+function normSym(t: string): string {
+  return t.trim().toUpperCase();
+}
+
 const FETCH_TIMEOUT_MS = Number(process.env.CALA_FETCH_TIMEOUT_MS ?? 120_000);
-const HARVEST_RETRY_LIMIT = 10;
+const HARVEST_RETRY_LIMIT = 28;
 const BATCH_DELAY_MS = Number(process.env.CALA_BATCH_DELAY_MS ?? 2_000);
 
 const CONCURRENCY = Number(process.env.CALA_HARVEST_CONCURRENCY ?? 5);
@@ -54,11 +100,8 @@ const DATA_DIR = resolveDataDir();
 const PRICE_DB_PATH = join(DATA_DIR, "price-db.json");
 const BAD_TICKERS_PATH = join(DATA_DIR, "bad-tickers.json");
 
-interface PriceEntry {
-  ticker: string;
-  purchasePrice: number;
-  evalPrice: number;
-  returnPct: number;
+function schedulePriceDbSupabaseSync(db: PriceDB): void {
+  void import("@/lib/cala-supabase-sync").then((m) => m.syncPriceDbToSupabase(db.prices));
 }
 
 interface PriceDB {
@@ -66,26 +109,17 @@ interface PriceDB {
   prices: Record<string, PriceEntry>;
 }
 
-interface Allocation {
-  nasdaq_code: string;
-  amount: number;
-}
-
-interface PortfolioAudit {
-  name: string;
-  lineCount: number;
-  uniqueCount: number;
-  duplicateTickers: string[];
-  totalAmount: number;
-  minAmount: number;
-  belowMinTickers: string[];
-  valid: boolean;
-  error: string | null;
-}
-
 function loadPriceDB(): PriceDB {
   if (existsSync(PRICE_DB_PATH)) {
-    return JSON.parse(readFileSync(PRICE_DB_PATH, "utf-8"));
+    const raw = JSON.parse(readFileSync(PRICE_DB_PATH, "utf-8")) as PriceDB;
+    const prices: Record<string, PriceEntry> = {};
+    for (const [k, v] of Object.entries(raw.prices ?? {})) {
+      const n = normSym(k);
+      if (!n) continue;
+      const entry = v as PriceEntry;
+      prices[n] = { ...entry, ticker: n };
+    }
+    return { lastUpdated: raw.lastUpdated, prices };
   }
   return { lastUpdated: new Date().toISOString(), prices: {} };
 }
@@ -95,17 +129,44 @@ function savePriceDB(db: PriceDB) {
   writeFileSync(PRICE_DB_PATH, JSON.stringify(db, null, 2));
 }
 
+/**
+ * Entry quality: `price-db.json` is a cache of **live** submit responses (`purchase_prices_apr15` /
+ * `eval_prices_today`), not a separate quote API. Re-run `--harvest` to refresh before `--optimize`.
+ */
+function maybeWarnStalePriceDb(db: PriceDB) {
+  const maxH = Number(process.env.CALA_PRICE_DB_WARN_STALE_HOURS ?? "48");
+  if (maxH <= 0) return;
+  const age = priceDbAgeHours(db.lastUpdated);
+  if (age != null && age <= maxH) return;
+  console.warn(
+    `   ⚠️  price-db stale or unknown age: lastUpdated=${db.lastUpdated}` +
+      (age != null ? ` (~${age.toFixed(1)}h ago)` : "") +
+      ` (warn if >${maxH}h). Re-run --harvest. CALA_PRICE_DB_WARN_STALE_HOURS=0 silences.`,
+  );
+}
+
+let badTickerEntries: BadTickerEntry[] = parseBadTickerFile(BAD_TICKERS_PATH);
+
 function loadPersistedBadTickers(): string[] {
-  try {
-    if (existsSync(BAD_TICKERS_PATH)) {
-      return JSON.parse(readFileSync(BAD_TICKERS_PATH, "utf-8"));
-    }
-  } catch { /* ignore corrupt file */ }
-  return [];
+  return dedup(badTickerEntries.map((e) => e.ticker));
 }
 
 function savePersistedBadTickers(tickers: Set<string>) {
-  writeFileSync(BAD_TICKERS_PATH, JSON.stringify([...tickers].sort(), null, 2));
+  const now = new Date().toISOString();
+  const existing = new Map(
+    badTickerEntries.map((e) => {
+      const n = normSym(e.ticker);
+      return [n, { ...e, ticker: n }] as const;
+    }),
+  );
+  const merged: BadTickerEntry[] = dedup([...tickers].map(normSym)).map(
+    (n) => existing.get(n) ?? { ticker: n, failedAt: now },
+  );
+  badTickerEntries = merged;
+  serializeBadTickerFile(BAD_TICKERS_PATH, merged);
+  void import("@/lib/cala-supabase-sync").then((m) =>
+    m.syncBadTickersToSupabase(new Set(merged.map((e) => e.ticker))),
+  );
 }
 
 async function fetchJsonWithTimeout<T>(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<T> {
@@ -250,6 +311,7 @@ const ALL_TICKERS = [
   "ALAB", "BMNR", "TMC", "CDLX", "TERN", "ONDS", "CRWV", "PSTG", "RUM", "RCUS",
   "RR", "CRCL", "LICY", "RZLT", "KROS", "PHAT", "AIRE", "MVIS", "LPSN", "COMM",
   "XERS", "WK", "PRME", "SANA", "RZLV", "DFLI", "IVVD", "SOC", "ASPI",
+  "UMAC", "USAR", "CRML", "PGY", "FIGR", "LYRA", "BNAI", "ORMP", "INMB", "QNCX",
 
   // === Crypto mining / BTC infrastructure (likely moonshot territory) ===
   "MARA", "RIOT", "CLSK", "HUT", "BITF", "BTBT", "BTDR",
@@ -770,16 +832,228 @@ const ALL_TICKERS = [
   // === WAVE 5: Extra nano-cap / clinical-stage probes (competitor sweep) ===
   "RANI", "CGTX", "IMNN", "KNSA", "SLRX", "ALLR", "ABVE", "HOWL",
   "TCRX", "MIRA", "FDMT", "PHVS",
+
+  // === WAVE 6: VERIFIED HIGH-RETURN TICKERS (Apr 2025→2026 research) ===
+  // Top verified percentage gainers from NerdWallet/StatMuse/Stocknear
+  "RELI", "CHEK", "QMMM", "BW", "NINE", "RGC", "SHAZ", "SNDK",
+  "KOD", "SLGL", "TNGX", "ERAS", "ANRO", "CELC", "XWIN",
+  "DMRA", "MGRT", "EXAS", "BNAI", "PRAX", "LWLG", "ONDS",
+  "NEGG", "OVID", "HYMC",
+
+  // Extreme micro/nano-cap movers (sub-penny → dollars potential)
+  "PBLA", "CREV", "SKYQ", "BIAF", "MLGO", "ICCT", "CSAI",
+  "ABAT", "WNW", "PSTV", "CRVS",
+
+  // User-requested tickers (remaining not already in list)
+  "VINE", "TOP", "XELA", "OBLG", "PRFX", "TCON", "SNOA", "AEMD",
+  "NXGL", "SATL", "BFRG",
+
+  // More extreme nano-cap / pink-to-NASDAQ uplist candidates
+  "EHYD", "CBDS", "OZSC", "HCDI", "DPSI", "WBUY", "ELEK", "EVIO",
+  "MBOT", "RGBP", "LEDS", "ABEO", "CMRX", "CSSE", "DFFN", "EDTX",
+  "ETNB", "FEMY", "GRNQ", "HOOK", "ILAG", "KTTA", "LXRX", "MYSZ",
+  "NDRA", "ONCS", "PAVS", "PEGY", "RUBY", "SBET", "TRVG", "VVOS",
+  "XAIR", "ZIVO", "BRSH", "MKFG",
+
+  // More crypto/BTC plays not yet harvested
+  "BKKT", "CIFR", "MSTR", "COIN", "SOS", "EBON", "BTCY",
+
+  // Additional biotech micro-caps with binary event potential
+  "INBS", "ARDS", "CLRB", "CASI", "AGTC", "ATOS", "CALA",
+  "CYCC", "DERM", "FLGT", "GLSI", "GTBP", "HGEN", "HSTO",
+  "IDBA", "IMRN", "INMB", "IPHA", "KPTI", "LPCN", "MRTX",
+  "NBRV", "NEOS", "NVAX", "OCUP", "ONCT", "ORPH", "PRTA",
+  "PTGX", "RLAY", "SBBP", "SENS", "SGMO", "SNGX", "TARS",
+  "TTOO", "TXMD", "VBIV", "VRCA", "VTGN", "ZNTL",
+
+  // === WAVE 7: REVERSE SPLIT CANDIDATES (post Apr 15, 2025) ===
+  // High-ratio reverse splits that may yield unadjusted API returns
+  // 1:200 splits
+  "NXTT", "JTAI",
+  // 1:100+ splits
+  "ADTX", "CBIO", "AREB", "LBGJ", "ONCO",
+  // 1:30-50 splits
+  "WCT", "NUWE", "NVVE", "NITO", "YHC", "NVNO", "PAVM", "ABP", "OGEN",
+  // 1:20-25 splits
+  "ADV", "AGL", "ADIL", "WAI", "ACXP", "TC", "PED", "XHG", "NVDQ", "AMRN", "MRDN",
+  // Additional reverse split plays
+  "LDSN", "CISO", "COSM", "EDBL", "SBFM", "CNSP", "MGOL", "SMFL",
+  "TBLT", "GFAI", "IMPP", "KTTA", "AULT", "TKLF", "KORE", "HOUR",
+  "CEMI", "ATPC", "BTBT", "NCPL", "MITQ", "BSFC", "WHLM", "GPAK",
+  "CRGE", "AREC", "BASA", "INDO", "SNSE", "BENF", "CPTN", "TLSA",
+  "DRCT", "NVTS", "ATHE", "MLTX", "APRE", "ELMS", "CTCX", "EEIQ",
+
+  // === WAVE 7: OTC PINK SHEETS / EXTREME MOVERS (most won't work but worth trying) ===
+  "EHYD", "NECA", "STIXF", "BIORQ",
+
+  // === WAVE 7: IPO MOONSHOTS / SPAC de-SPAC plays ===
+  "MGRT", "SDM", "TDIC", "EDHL", "BAOS",
+  "BRLS", "GCT", "WIMI", "KUKE", "CANG", "GMAB",
+  "NUVB", "DM", "ASTR", "SPCE", "RKLB",
+  "LUNR", "RDW", "MNTS", "ASTS",
+
+  // === WAVE 7: POST-BANKRUPTCY MOONSHOTS ===
+  "WOLF",
+
+  // === WAVE 7: BIOTECH FDA APPROVALS / MERGERS ===
+  "HIMS", "CORT", "MDGL", "KRYS", "PCVX", "VERV",
+  "BMRN", "SRPT", "ALNY", "VKTX", "PTGX", "AKRO",
+  "RXRX", "AGIO", "TGTX", "ADMA", "JANX", "NUVL",
+
+  // === WAVE 7: AI / QUANTUM ULTRA-SMALL-CAP ===
+  "SOUN", "BBAI", "BSQR", "DTST", "INOD", "SYM",
+  "AEVA", "OUST", "INDI", "LIDR",
+
+  // === WAVE 7: CHINESE NANO-CAPs that moon ===
+  "JZ", "LITM", "NIO", "LI", "XPEV",
+  "CPOP", "AIXI", "NISN", "WISA", "CXDO",
+  "RCAT", "UMAC", "BRLT",   "UTME", "EZGO",
+
+  // === WAVE 8: TICKER CHANGES 2026 — new tickers (API may return old co's Apr 2025 price) ===
+  "ZTG", "YOOV", "SDEV", "KEEL", "CSHR", "NEXR", "XNDU", "CYAB",
+  "GLND", "MRLN", "GIX", "VIVO", "FNUC", "QUCY", "GRML", "GMEX",
+  "DMRA", "FLNA", "OIO", "FRMM", "NXTS", "ALOY", "RYZ", "CVSA",
+  "XRN", "GGRP", "ARIS", "CNTN", "AIOS", "RPC", "DFNS", "DCH",
+  "TULP", "ZSTK", "QTI", "EZRA", "GPGI", "OLOX", "PDC", "DCBG", "RMIX",
+
+  // === WAVE 8: TICKER CHANGES 2025 — new tickers ===
+  "ABXL", "ABX", "OPLN", "BVC", "HTT", "RENX", "DTCX", "FEED",
+  "TWAV", "TJGC", "DCX", "AMCI", "XXI", "AGIG", "GRDX", "MBAI",
+  "RJET", "OSG", "OPTU", "AIXC", "TDAY", "FWDI", "CYPH", "CD",
+  "AVX", "PTN", "HERE", "XWIN", "AXIA", "FTW", "EMBJ", "ALPS",
+  "NBP", "IMSR", "BYAH", "GIW", "NUCL", "SLAI", "AURE", "NKLR", "BNKK",
+
+  // === WAVE 8: OLD tickers from changes (may still have API data) ===
+  "CIGL", "NBY", "VCIC", "JFBR", "CHAC", "TBMC", "PELI", "BACQ",
+  "VVPR", "MYNZ", "KLTO", "FTEL", "GLTO", "SAVA", "ESGL", "GMGI",
+  "ETHZ", "BLBX", "ATGE", "GMRE", "VRAR", "ARMN", "THAR", "NUKK",
+  "FLGC", "CMPO", "SGBX", "ELWS", "KAR", "STEC", "QD", "SGD",
+  "NAOV", "MCTR", "CJET", "CEP", "HUSA", "AMRK", "ENTO", "CHEK",
+  "MESA", "AMBC", "ATUS", "QLGN", "GCI", "LPTX", "MFH", "AGRI",
+  "PTNT", "QSG", "NVFY", "EBR", "EQV", "GLLI", "IMAB", "HOND",
+  "PHH", "SVII", "BTCM", "PWM", "GSRT", "SHOT",
+
+  // === WAVE 8: UPLISTED FROM OTC TO NASDAQ ===
+  "GOAI", "ELPW",
+
+  // === WAVE 8: SPAC de-SPAC mergers with ticker changes ===
+  "HYAC", "GIXXU", "GIWWU",
+
+  // === WAVE 9: POST-APR-15-2025 IPOs — API may give anomalous purchase price ===
+  // Oct 2025 IPO, $4→$172 = potential 10,000x+ if API returns near-zero Apr 15 price
+  "TCGL",
+  // Major 2025 IPOs after April 15
+  "CHYM", "BLLN", "ANDG", "MDLN", "FRMI", "CDNL", "CHA", "WLTH",
+  "AERO", "AII", "SMA", "GLOO",
+  // 2025 H2 IPOs — biotech, tech, fintech
+  "SION", "BBNX", "KMTS", "FIGR", "CRCL", "STUB", "OMDA",
+  // 2026 IPOs — very recent, should definitely have no Apr 2025 price
+  "MANE", "SGP", "PAYP", "BOBS", "OFRM", "BTGO", "EQPT", "AKTS",
+  "YSS", "HMH", "JAN", "MMED", "MWH", "FPS", "PICS", "APC",
+  // More 2025 late-year IPOs
+  "SCPQ", "SVAQ", "BEBE", "ADAC", "CCXI", "LMRI",
+  // High-growth 2025 IPOs — any that mooned from low IPO prices
+  "MGRT", "SDST", "BFAM", "NUVB", "HIMS",
+  // Chinese nano-caps that IPO'd on NASDAQ after April 2025
+  "SDM", "TDIC", "EDHL", "DRCT", "BAOS", "VSME",
+
+  // === WAVE 10: CRITICAL — AWIN (AERWINS Technologies) 13,119,900% on NASDAQ ===
+  "AWIN",  // $0.0002 → $26.24, NASDAQ-listed, 13 million % gain
+  "HUMA",  // Humacyte, penny biotech
+
+  // === WAVE 10: STATMUSE EXTREME MOVERS (53,000%+ in 4 months) ===
+  "JNVR",  // Janover Inc, +1,901% since Jan 2025
+  "ASST",  // Asset Entities, +840%
+  "TOI",   // Oncology Institute, +674%
+  "GITS",  // Global Interactive Technologies, +568%
+  "DOMH",  // Dominari, +518%
+  "KDLY",  // Kindly MD, +517%
+  "OCG",   // Oriental Culture, +451%
+  "NUTX",  // Nutex Health, +396%
+  "RGLS",  // Regulus Therapeutics, +390%
+  "ABTS",  // Abits, +386%
+  "TDUP",  // ThredUp, +381%
+  "YOSH",  // Yoshiharu Global, +346%
+  "MNDR",  // Mobile-health Network, +322%
+  "CURI",  // CuriosityStream, +298%
+  "FNGR",  // FingerMotion, +269%
+  "NTCL",  // Netclass Technology, +254%
+  "DBVT",  // DBV Technologies, +249%
+  "CRVO",  // CervoMed, +247%
+  "NXTT",  // Next Technology, +1,069% in 1 month
+  "PNBK",  // Patriot National Bancorp, +356% in 1 month
+  "UPXI",  // Upexi, +312%
+  "AREN",  // Arena, +297%
+  "BATL",  // Battalion Oil, +674% in 1 month
+  "EDSA",  // Edesa Biotech, +527%
+  "TURB",  // Turbo Energy, +396%
+  "ANTX",  // AN2 Therapeutics, +385%
+  "RXT",   // Rackspace Technology
+  "XWEL",  // XWELL
+  "SGN",   // Signing Day Sports
+  "CDIO",  // Cardio Diagnostics
+  "MOBX",  // Mobix Labs
+  "SNSE",  // Sensei Biotherapeutics
+  "TMDE",  // TMD Energy
+  "TWNP",  // Twin Hospitality
+  "TPET",  // Trio Petroleum
+  "ATOM",  // Atomera
+  "NAMM",  // Namib Minerals
+  "LVLU",  // Lulu's Fashion Lounge
+  "ALMS",  // Alumis
+  "WATT",  // Energous
+  "ANPA",  // Rich Sparkle Holdings
+  "SDOT",  // Sadot
+  "ZNTL",  // Zentalis Pharmaceuticals
+  "MRNO",  // Murano Global Investments
+  "RPID",  // Rapid Micro Biosystems
+  "DVLT",  // Datavault AI
+  "RCKT",  // Rocket Pharmaceuticals
+  "EVTV",  // Envirotech Vehicles, +620%
+  "YI",    // 111 Inc
+  "IBRX",  // Immunitybio
+  "ERAS",  // Erasca
+  "PMN",   // ProMIS Neurosciences
 ];
 
+/** Optional: merge tickers from research-agent (`data/research-harvest-candidates.json`) and CALA_HARVEST_CANDIDATE_FILES. */
+const RESEARCH_HARVEST_CANDIDATES_REL = "data/research-harvest-candidates.json";
+
+function discoverHarvestUniverse(): string[] {
+  const extraPaths: string[] = [];
+  const envFiles = process.env.CALA_HARVEST_CANDIDATE_FILES?.trim();
+  if (envFiles) {
+    for (const p of envFiles.split(/[,\s]+/)) {
+      const s = p.trim();
+      if (s) extraPaths.push(s);
+    }
+  }
+  if (process.env.CALA_MERGE_RESEARCH_CANDIDATES !== "0") {
+    const abs = join(process.cwd(), RESEARCH_HARVEST_CANDIDATES_REL);
+    if (existsSync(abs) && !extraPaths.includes(RESEARCH_HARVEST_CANDIDATES_REL)) {
+      extraPaths.push(RESEARCH_HARVEST_CANDIDATES_REL);
+    }
+  }
+  const loaded = loadHarvestCandidateFiles(extraPaths);
+  const fromFiles = loaded.flatMap(l => l.tickers);
+  return buildHarvestUniverse(ALL_TICKERS, process.env.CALA_EXTRA_TICKERS, fromFiles);
+}
+
+/** Deduped list: valid 1–5 letter symbols only; merges research/candidate JSON when configured. */
+const HARVEST_UNIVERSE = discoverHarvestUniverse();
+const UNIVERSE_RAW_INVALID_FORMAT = splitHarvestUniverse(ALL_TICKERS).invalidFormat.length;
+
+/** Uppercase unique tickers (Cala keys / bad-ticker Set must match). */
 function dedup(tickers: string[]): string[] {
   const seen = new Set<string>();
-  return tickers.filter(t => {
-    const upper = t.toUpperCase();
-    if (seen.has(upper)) return false;
-    seen.add(upper);
-    return true;
-  });
+  const out: string[] = [];
+  for (const t of tickers) {
+    const u = normSym(t);
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
 }
 
 /**
@@ -834,9 +1108,11 @@ const badTickers = new Set<string>([
 ]);
 
 function harvestReplacementCandidates(db: PriceDB, universeOrder: string[]): string[] {
-  const u = dedup(universeOrder).filter(t => !badTickers.has(t));
+  const u = dedup(universeOrder).filter(t => !badTickers.has(normSym(t)));
   const pending = u.filter(t => !db.prices[t]);
-  return sortPendingForHarvest(pending, universeOrder);
+  const cached = u.filter(t => db.prices[t])
+    .sort((a, b) => (db.prices[a].returnPct ?? 0) - (db.prices[b].returnPct ?? 0));
+  return [...sortPendingForHarvest(pending, universeOrder), ...cached];
 }
 
 function chunkInto50(tickers: string[]): string[][] {
@@ -847,7 +1123,8 @@ function chunkInto50(tickers: string[]): string[][] {
     if (chunk.length === 50) {
       chunks.push(chunk);
     } else if (chunk.length > 0) {
-      const padding = unique.filter(t => !chunk.includes(t)).slice(0, 50 - chunk.length);
+      const inChunk = new Set(chunk.map(normSym));
+      const padding = unique.filter(t => !inChunk.has(normSym(t))).slice(0, 50 - chunk.length);
       chunks.push([...chunk, ...padding]);
     }
   }
@@ -860,7 +1137,7 @@ function chunkInto50(tickers: string[]): string[][] {
  */
 function buildHarvestBatches(tickers: string[], db: PriceDB): string[][] {
   const universeOrder = dedup(tickers);
-  const unique = universeOrder.filter(t => !badTickers.has(t));
+  const unique = universeOrder.filter(t => !badTickers.has(normSym(t)));
   const pending = sortPendingForHarvest(
     unique.filter(t => !db.prices[t]),
     universeOrder,
@@ -872,27 +1149,15 @@ function buildHarvestBatches(tickers: string[], db: PriceDB): string[][] {
   return chunkInto50(ordered);
 }
 
-function buildEqualAllocations(tickers: string[]): Allocation[] {
-  const n = tickers.length;
-  const perStock = Math.floor(TOTAL_BUDGET / n);
-  let remainder = TOTAL_BUDGET - perStock * n;
-  return tickers.map(t => {
-    const extra = remainder > 0 ? 1 : 0;
-    if (remainder > 0) remainder--;
-    return { nasdaq_code: t, amount: perStock + extra };
-  });
-}
-
 function extractBadTicker(errorStr: string): string | null {
-  const up = (s: string) => s.toUpperCase();
   const m0 = errorStr.match(/(\w+): No closing price found/i);
-  if (m0) return up(m0[1]);
+  if (m0) return normSym(m0[1]);
   const m = errorStr.match(/(\w+): Failed to fetch historical price/);
-  if (m) return up(m[1]);
+  if (m) return normSym(m[1]);
   const m2 = errorStr.match(/Price fetch failed.*?(\b[A-Z]{1,5}\b): Failed/);
-  if (m2) return m2[1];
+  if (m2) return normSym(m2[1]);
   const m3 = errorStr.match(/Missing price data for (\w+)/i);
-  if (m3) return up(m3[1]);
+  if (m3) return normSym(m3[1]);
   return null;
 }
 
@@ -905,46 +1170,15 @@ function extractAllBadTickers(detail: string): string[] {
   }
   const whole = extractBadTicker(detail);
   if (whole) seen.add(whole);
-  return [...seen];
-}
-
-function auditAllocations(name: string, allocs: Allocation[]): PortfolioAudit {
-  const seen = new Set<string>();
-  const duplicateTickers: string[] = [];
-  const belowMinTickers: string[] = [];
-  let totalAmount = 0;
-  let minAmount = Number.POSITIVE_INFINITY;
-
-  for (const alloc of allocs) {
-    const ticker = alloc.nasdaq_code.toUpperCase();
-    if (seen.has(ticker)) duplicateTickers.push(ticker);
-    seen.add(ticker);
-    totalAmount += alloc.amount;
-    minAmount = Math.min(minAmount, alloc.amount);
-    if (alloc.amount < MIN_PER_STOCK) belowMinTickers.push(`${ticker}=$${alloc.amount}`);
+  // Compound errors: "PICS: Failed ...; APC: Failed ..." — also catch every Ticker: Failed... in one string.
+  for (const m of detail.matchAll(/\b([A-Za-z]{1,5}):\s*Failed to fetch historical price/gi)) {
+    seen.add(normSym(m[1]));
   }
-
-  const lineCount = allocs.length;
-  const uniqueCount = seen.size;
-  const minValue = Number.isFinite(minAmount) ? minAmount : 0;
-  let error: string | null = null;
-
-  if (lineCount !== MIN_STOCKS) error = `need ${MIN_STOCKS} stocks, got ${lineCount}`;
-  else if (uniqueCount !== lineCount) error = `duplicate ticker(s): ${duplicateTickers.join(", ")}`;
-  else if (belowMinTickers.length > 0) error = `below min: ${belowMinTickers.join(", ")}`;
-  else if (totalAmount !== TOTAL_BUDGET) error = `sum $${totalAmount} !== $${TOTAL_BUDGET}`;
-
-  return {
-    name,
-    lineCount,
-    uniqueCount,
-    duplicateTickers,
-    totalAmount,
-    minAmount: minValue,
-    belowMinTickers,
-    valid: error === null,
-    error,
-  };
+  for (const m of detail.matchAll(/\b([A-Za-z]{1,5}):\s*No closing price found/gi)) {
+    seen.add(normSym(m[1]));
+  }
+  const noise = new Set(["HTTP", "JSON"]);
+  return [...seen].filter(s => /^[A-Z]{1,5}$/.test(s) && !noise.has(s));
 }
 
 function logAllocationAudit(audit: PortfolioAudit) {
@@ -963,7 +1197,7 @@ async function submitAndHarvest(
   db: PriceDB,
   retryCount = 0,
 ): Promise<number> {
-  const validTickers = tickers.filter(t => !badTickers.has(t));
+  const validTickers = tickers.filter(t => !badTickers.has(normSym(t)));
   if (validTickers.length < MIN_STOCKS) {
     console.error(`   ❌ Not enough valid tickers (${validTickers.length})`);
     return 0;
@@ -1003,13 +1237,14 @@ async function submitAndHarvest(
     console.log(`   ✅ Portfolio: $${totalValue?.toLocaleString()} (${returnPct > 0 ? "+" : ""}${returnPct.toFixed(2)}%)`);
 
     let newCount = 0;
+    const harvestTs = new Date().toISOString();
     for (const ticker of Object.keys(purchasePrices)) {
       const pp = purchasePrices[ticker];
       const ep = evalPrices[ticker];
       if (pp && ep) {
         const ret = ((ep - pp) / pp) * 100;
         const isNew = !db.prices[ticker];
-        db.prices[ticker] = { ticker, purchasePrice: pp, evalPrice: ep, returnPct: ret };
+        db.prices[ticker] = { ticker, purchasePrice: pp, evalPrice: ep, returnPct: ret, lastHarvestedAt: harvestTs };
         if (isNew) newCount++;
       }
     }
@@ -1021,13 +1256,18 @@ async function submitAndHarvest(
     const bads = extractAllBadTickers(String(detail));
     if (bads.length > 0 && retryCount < HARVEST_RETRY_LIMIT) {
       console.log(`   ⚠️  Bad ticker(s): ${bads.join(", ")} — removing and retrying`);
-      for (const b of bads) badTickers.add(b);
+      for (const b of bads) badTickers.add(normSym(b));
       savePersistedBadTickers(badTickers);
-      const newTickers = use.filter(t => !bads.includes(t));
+      const badSet = new Set(bads.map(normSym));
+      const newTickers = use.filter(t => !badSet.has(normSym(t)));
       while (newTickers.length < MIN_STOCKS) {
-        const replacement = harvestReplacementCandidates(db, ALL_TICKERS).find(t => !newTickers.includes(t));
+        const have = new Set(newTickers.map(normSym));
+        const replacement = harvestReplacementCandidates(db, HARVEST_UNIVERSE).find(
+          t => !have.has(normSym(t)),
+        );
         if (!replacement) break;
         newTickers.push(replacement);
+        have.add(normSym(replacement));
       }
       if (newTickers.length < MIN_STOCKS) {
         console.error(
@@ -1037,6 +1277,13 @@ async function submitAndHarvest(
       }
       return submitAndHarvest(newTickers.slice(0, MIN_STOCKS), batchLabel, db, retryCount + 1);
     }
+    const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|abort/i.test(detail);
+    if (isNetworkError && retryCount < 3) {
+      const backoff = (retryCount + 1) * 2000;
+      console.log(`   ⚠️  Network error, retrying in ${backoff / 1000}s... (${detail.slice(0, 80)})`);
+      await new Promise(r => setTimeout(r, backoff));
+      return submitAndHarvest(tickers, batchLabel, db, retryCount + 1);
+    }
     console.error(`   ❌ Failed: ${String(detail).slice(0, 200)}`);
     return 0;
   }
@@ -1044,18 +1291,36 @@ async function submitAndHarvest(
 
 async function harvest() {
   const db = loadPriceDB();
-  const unique = dedup(ALL_TICKERS);
-  const pending = unique.filter(t => !db.prices[t] && !badTickers.has(t));
-  const chunks = buildHarvestBatches(ALL_TICKERS, db);
+  maybeWarnStalePriceDb(db);
+  const unique = HARVEST_UNIVERSE;
+  const pending = unique.filter(t => !db.prices[normSym(t)] && !badTickers.has(normSym(t)));
+  let chunks = buildHarvestBatches(HARVEST_UNIVERSE, db);
+  const maxBatches = Number(process.env.CALA_HARVEST_MAX_BATCHES ?? "0");
+  if (maxBatches > 0 && chunks.length > maxBatches) {
+    console.log(`   CALA_HARVEST_MAX_BATCHES=${maxBatches}: limiting to first ${maxBatches}/${chunks.length} batch(es)`);
+    chunks = chunks.slice(0, maxBatches);
+  }
 
   console.log(
-    `🌾 Price Harvester — ${unique.length} universe, ${pending.length} pending, ${chunks.length} batch(es), concurrency=${CONCURRENCY}`,
+    `🌾 Price Harvester — ${unique.length} harvest universe (${ALL_TICKERS.length} raw list, ${UNIVERSE_RAW_INVALID_FORMAT} invalid-format dropped), ${pending.length} pending, ${chunks.length} batch(es), concurrency=${CONCURRENCY}`,
   );
-  console.log(`   Cached: ${Object.keys(db.prices).length} | Bad: ${badTickers.size}\n`);
+  console.log(`   Cached: ${Object.keys(db.prices).length} | Bad: ${badTickers.size}`);
+  console.log(
+    `   Note: prices come from live submit responses (Apr-15 buy vs mark); refresh with --harvest before trusting --optimize.\n`,
+  );
 
   if (chunks.length === 0) {
     console.log("   Nothing to harvest (all known or blocked). Use --show or expand ALL_TICKERS.");
     showRankings(db);
+    appendCalaRunLog(DATA_DIR, {
+      phase: "harvest",
+      team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+      price_db_count: Object.keys(db.prices).length,
+      bad_ticker_count: badTickers.size,
+      harvest_new_prices: 0,
+      harvest_elapsed_s: 0,
+    });
+    schedulePriceDbSupabaseSync(db);
     return;
   }
 
@@ -1079,7 +1344,9 @@ async function harvest() {
     const results = await Promise.allSettled(
       wave.map(async (chunk, j) => {
         const idx = waveIdx[j];
-        const unknownInBatch = chunk.filter(t => !db.prices[t] && !badTickers.has(t));
+        const unknownInBatch = chunk.filter(
+          t => !db.prices[normSym(t)] && !badTickers.has(normSym(t)),
+        );
         console.log(`   [${idx}] ${unknownInBatch.length} new tickers (+ padding to 50)`);
         await new Promise(r => setTimeout(r, j * 500));
         return submitAndHarvest(chunk, `harvest_${idx}`, db);
@@ -1108,6 +1375,15 @@ async function harvest() {
   const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
   console.log(`\n✅ Harvest complete: ${Object.keys(db.prices).length} total prices (${totalNew} new) in ${elapsed}s`);
   console.log(`   Bad tickers (persisted): ${badTickers.size}`);
+  appendCalaRunLog(DATA_DIR, {
+    phase: "harvest",
+    team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+    price_db_count: Object.keys(db.prices).length,
+    bad_ticker_count: badTickers.size,
+    harvest_new_prices: totalNew,
+    harvest_elapsed_s: Number(elapsed),
+  });
+  schedulePriceDbSupabaseSync(db);
   showRankings(db);
 }
 
@@ -1145,12 +1421,9 @@ function showRankings(db: PriceDB) {
   }
 }
 
-function validateAllocations(allocs: Allocation[]): string | null {
-  return auditAllocations("validation", allocs).error;
-}
-
 async function optimize(dryRun: boolean) {
   const db = loadPriceDB();
+  maybeWarnStalePriceDb(db);
   const entries = Object.values(db.prices).sort((a, b) => b.returnPct - a.returnPct);
 
   if (entries.length < MIN_STOCKS) {
@@ -1179,6 +1452,7 @@ async function optimize(dryRun: boolean) {
   // Strategy C: Return-proportional for top 50
   const strategyC = buildReturnProportional(entries);
   const strategyD = buildDualConcentration(entries);
+  const strategyE = buildTripleConcentration(entries);
 
   console.log(`\n${"═".repeat(70)}`);
   console.log(`  OPTIMIZATION STRATEGIES`);
@@ -1189,6 +1463,7 @@ async function optimize(dryRun: boolean) {
     { name: "top_weighted", allocs: strategyB },
     { name: "return_proportional", allocs: strategyC },
     { name: "dual_concentrate", allocs: strategyD },
+    { name: "triple_concentrate", allocs: strategyE },
   ];
 
   for (const s of strategies) {
@@ -1197,13 +1472,9 @@ async function optimize(dryRun: boolean) {
     if (err) console.log(`\n  ⚠️  ${s.name} invalid: ${err}`);
   }
 
+  const priceLookup = priceEntriesToLookup(Object.values(db.prices));
   for (const s of strategies) {
-    const projectedValue = s.allocs.reduce((sum, a) => {
-      const p = db.prices[a.nasdaq_code];
-      if (!p) return sum;
-      const shares = a.amount / p.purchasePrice;
-      return sum + shares * p.evalPrice;
-    }, 0);
+    const projectedValue = projectedTerminalValueUsd(s.allocs, priceLookup);
     const projectedReturn = ((projectedValue - TOTAL_BUDGET) / TOTAL_BUDGET) * 100;
     console.log(`\n  ${s.name}:`);
     console.log(`    Projected: $${projectedValue.toLocaleString(undefined, { maximumFractionDigits: 0 })} (${projectedReturn > 0 ? "+" : ""}${projectedReturn.toFixed(1)}%)`);
@@ -1216,12 +1487,7 @@ async function optimize(dryRun: boolean) {
     return;
   }
 
-  const projectedVal = (allocs: Allocation[]) =>
-    allocs.reduce((sum, a) => {
-      const p = db.prices[a.nasdaq_code];
-      if (!p) return sum;
-      return sum + (a.amount / p.purchasePrice) * p.evalPrice;
-    }, 0);
+  const projectedVal = (allocs: Allocation[]) => projectedTerminalValueUsd(allocs, priceLookup);
 
   const bestStrategy = validStrategies.reduce((best, s) =>
     projectedVal(s.allocs) > projectedVal(best.allocs) ? s : best,
@@ -1233,8 +1499,21 @@ async function optimize(dryRun: boolean) {
     console.error(`   ❌ Best strategy failed validation: ${submitErr}`);
     return;
   }
+
+  const bestProjected = projectedVal(bestStrategy.allocs);
+  const bestProjectedReturn = ((bestProjected - TOTAL_BUDGET) / TOTAL_BUDGET) * 100;
+
   if (dryRun) {
     console.log(`   --dry-run: skipping POST to ${submitUrl()}`);
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_dry_run",
+      team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+      best_strategy: bestStrategy.name,
+      dry_run: true,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      price_db_count: entries.length,
+    });
     return;
   }
 
@@ -1242,6 +1521,16 @@ async function optimize(dryRun: boolean) {
     console.error(
       "   ❌ Live optimize submit blocked — set CALA_ALLOW_SUBMIT=1 after operator approval, or use --dry-run.",
     );
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_submit_blocked",
+      team_id: process.env.CALA_TEAM_ID?.trim() ?? null,
+      best_strategy: bestStrategy.name,
+      dry_run: false,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      price_db_count: entries.length,
+      error_message: "CALA_ALLOW_SUBMIT is not 1",
+    });
     return;
   }
 
@@ -1267,18 +1556,18 @@ async function optimize(dryRun: boolean) {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error(`   ❌ Failed: ${msg}`);
-      const rejected = extractBadTicker(msg);
-      if (rejected && attempt < 5) {
-        console.log(`   🔄 Removing rejected ticker "${rejected}" and retrying...`);
-        badTickers.add(rejected);
+      const rejectedAll = extractAllBadTickers(msg);
+      if (rejectedAll.length > 0 && attempt < 5) {
+        console.log(`   🔄 Skipping rejected ticker(s) "${rejectedAll.join(", ")}" and retrying...`);
+        for (const r of rejectedAll) badTickers.add(normSym(r));
         savePersistedBadTickers(badTickers);
-        if (db.prices[rejected]) delete db.prices[rejected];
-        savePriceDB(db);
         const cleaned = Object.values(db.prices)
-          .filter(e => !badTickers.has(e.ticker))
+          .filter(e => !badTickers.has(normSym(e.ticker)))
           .sort((a, b) => b.returnPct - a.returnPct);
         if (cleaned.length < MIN_STOCKS) {
-          console.error(`   ❌ Not enough valid tickers after removing ${rejected}`);
+          console.error(
+            `   ❌ Not enough valid tickers after removing ${rejectedAll.join(", ")}`,
+          );
           return null;
         }
         const newAllocs = allocationsForStrategy(stratName, cleaned);
@@ -1286,17 +1575,123 @@ async function optimize(dryRun: boolean) {
         if (err) { console.error(`   ❌ Rebuild failed: ${err}`); return null; }
         return trySubmit(newAllocs, stratName, attempt + 1);
       }
+      const isNetworkError = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|abort/i.test(msg);
+      if (isNetworkError && attempt < 4) {
+        const backoff = attempt * 2000;
+        console.log(`   ⚠️  Network error, retrying in ${backoff / 1000}s...`);
+        await new Promise(r => setTimeout(r, backoff));
+        return trySubmit(allocs, stratName, attempt + 1);
+      }
       return null;
     }
   }
 
   const result = await trySubmit(bestStrategy.allocs, bestStrategy.name, 1);
-  if (!result) return;
+  if (!result) {
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_submit_failed",
+      team_id: teamId,
+      best_strategy: bestStrategy.name,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      error_message: "submit returned null (HTTP error or exhausted retries)",
+    });
+    return;
+  }
 
   const value = result.total_value as number;
   const invested = result.total_invested as number;
   const ret = ((value - invested) / invested) * 100;
   console.log(`   ✅ ACTUAL: $${value?.toLocaleString()} (${ret > 0 ? "+" : ""}${ret.toFixed(2)}%)`);
+  appendCalaRunLog(
+    DATA_DIR,
+    {
+      phase: "optimize_submit",
+      team_id: teamId,
+      best_strategy: bestStrategy.name,
+      submit_return_pct: ret,
+      projected_value_usd: bestProjected,
+      projected_return_pct: bestProjectedReturn,
+      actual_total_value_usd: value,
+      actual_invested_usd: invested,
+      price_db_count: entries.length,
+    },
+    {
+      holdings: bestStrategy.allocs.map((a) => ({
+        ticker: a.nasdaq_code,
+        amount: a.amount,
+      })),
+    },
+  );
+
+  // Reconcile submit return vs leaderboard row (debug drift / timing)
+  try {
+    const board = await tryFetchCalaLeaderboardRows(FETCH_TIMEOUT_MS);
+    if (!board) {
+      console.log("   📋 Leaderboard reconcile: skipped (snapshot unavailable)");
+      appendCalaRunLog(DATA_DIR, {
+        phase: "optimize_submit_leaderboard_reconcile",
+        team_id: teamId,
+        submit_return_pct: ret,
+        leaderboard_return_pct: null,
+        drift_pp: null,
+        leaderboard_url: null,
+        note: "leaderboard unavailable",
+      });
+    } else {
+      const mineRow = board.rows.find((r) => leaderboardRowTeamId(r) === teamId);
+      const lbPct = mineRow ? leaderboardRowReturnPct(mineRow) : null;
+      const drift = lbPct != null ? ret - lbPct : null;
+      const benchSlug =
+        process.env.CALA_BENCHMARK_TEAM_ID?.trim().toLowerCase() || "sourish";
+      const summary = summarizeLeaderboardForTeam(board.rows, teamId, {
+        benchmarkTeamId: benchSlug,
+      });
+      console.log(
+        `   📋 Submit vs leaderboard: submit=${ret.toFixed(2)}% | row=${lbPct != null ? lbPct.toFixed(2) : "n/a"}% | drift=${drift != null ? `${drift >= 0 ? "+" : ""}${drift.toFixed(2)}` : "n/a"} pp`,
+      );
+      if (summary.ourRank != null && summary.topReturnPct != null) {
+        console.log(
+          `   📋 Board rank: ${summary.ourRank} / ${summary.enriched.length} | gap vs #1: ${summary.gapToFirstPp?.toFixed(2) ?? "n/a"} pp | vs ${benchSlug}: ${summary.gapToBenchmarkPp?.toFixed(2) ?? "n/a"} pp`,
+        );
+      }
+      appendCalaRunLog(DATA_DIR, {
+        phase: "optimize_submit_leaderboard_reconcile",
+        team_id: teamId,
+        submit_return_pct: ret,
+        leaderboard_return_pct: lbPct,
+        drift_pp: drift,
+        leaderboard_url: board.url,
+        rank: summary.ourRank,
+        our_return_pct: summary.ourReturnPct,
+        top_return_pct: summary.topReturnPct,
+        gap_to_first_pp: summary.gapToFirstPp,
+        benchmark_team_id: summary.benchmarkTeamId,
+        benchmark_return_pct: summary.benchmarkReturnPct,
+        gap_to_benchmark_pp: summary.gapToBenchmarkPp,
+        leaderboard_rows: summary.enriched.length,
+        leaderboard_row_snapshot: mineRow
+          ? {
+              return_pct: toNumOrNull(mineRow.return_pct),
+              total_value: toNumOrNull(mineRow.total_value),
+              total_invested: toNumOrNull(
+                mineRow.total_invested ?? mineRow.totalInvested,
+              ),
+            }
+          : null,
+        team_found_on_board: Boolean(mineRow),
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`   ⚠️  Leaderboard reconcile failed: ${msg}`);
+    appendCalaRunLog(DATA_DIR, {
+      phase: "optimize_submit_leaderboard_reconcile",
+      team_id: teamId,
+      submit_return_pct: ret,
+      error_message: msg,
+    });
+  }
 
   // Update prices from response
   const pp = (result.purchase_prices_apr15 ?? {}) as Record<string, number>;
@@ -1308,113 +1703,10 @@ async function optimize(dryRun: boolean) {
     }
   }
   savePriceDB(db);
+  schedulePriceDbSupabaseSync(db);
 
   const runId = `${bestStrategy.name}_${Date.now()}`;
   syncPortfolioRunToOmnigraph(runId, bestStrategy.name, value, ret, bestStrategy.allocs, db);
-}
-
-function buildMaxConcentration(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  // #1 stock gets max budget, bottom 49 get minimum
-  const top = entries.slice(0, 50);
-  const minBudget = MIN_PER_STOCK * 49;
-  const topBudget = TOTAL_BUDGET - minBudget;
-  
-  return top.map((e, i) => ({
-    nasdaq_code: e.ticker,
-    amount: i === 0 ? topBudget : MIN_PER_STOCK,
-  }));
-}
-
-function buildTopWeighted(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  const top50 = entries.slice(0, 50);
-  const topN = 5;
-  const disc = TOTAL_BUDGET - MIN_PER_STOCK * 50;
-  const topPool = Math.floor(disc * 0.8);
-  const botPool = disc - topPool;
-  const amounts = top50.map(() => MIN_PER_STOCK);
-
-  const topReturns = top50.slice(0, topN).map(e => Math.max(0, e.returnPct));
-  const topSum = topReturns.reduce((s, r) => s + r, 0) || 1;
-  let allocatedTop = 0;
-  for (let i = 0; i < topN; i++) {
-    const add = Math.floor(topPool * (topReturns[i] / topSum));
-    amounts[i] += add;
-    allocatedTop += add;
-  }
-  const topRem = topPool - allocatedTop;
-
-  const botCount = 50 - topN;
-  const perBot = Math.floor(botPool / botCount);
-  for (let i = topN; i < 50; i++) {
-    amounts[i] += perBot;
-  }
-  const botAllocated = perBot * botCount;
-  const botRem = botPool - botAllocated;
-
-  const sprinkle = (rem: number, indices: number[]) => {
-    let k = 0;
-    while (rem > 0 && indices.length > 0) {
-      amounts[indices[k % indices.length]]++;
-      rem--;
-      k++;
-    }
-  };
-  const topIdx = [...Array(topN).keys()].sort((a, b) => topReturns[b] - topReturns[a]);
-  sprinkle(topRem, topIdx);
-  sprinkle(botRem, [...Array(botCount).keys()].map(i => i + topN));
-
-  return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
-}
-
-function buildReturnProportional(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  const top50 = entries.slice(0, 50);
-  const disc = TOTAL_BUDGET - MIN_PER_STOCK * 50;
-  const returns = top50.map(e => Math.max(0.01, e.returnPct));
-  const totalR = returns.reduce((s, r) => s + r, 0);
-  const amounts = top50.map(() => MIN_PER_STOCK);
-  let allocated = 0;
-  for (let i = 0; i < 50; i++) {
-    const add = Math.floor(disc * (returns[i] / totalR));
-    amounts[i] += add;
-    allocated += add;
-  }
-  let rem = disc - allocated;
-  const idx = [...Array(50).keys()].sort((a, b) => returns[b] - returns[a]);
-  let k = 0;
-  while (rem > 0) {
-    amounts[idx[k % 50]]++;
-    rem--;
-    k++;
-  }
-  return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
-}
-
-/** Split discretionary capital between #1 and #2 by return (48 names at min). Useful when two moonshots cluster. */
-function buildDualConcentration(
-  entries: PriceEntry[],
-): { nasdaq_code: string; amount: number }[] {
-  const top50 = entries.slice(0, 50);
-  const disc = TOTAL_BUDGET - MIN_PER_STOCK * 50;
-  const r0 = Math.max(0.01, top50[0].returnPct);
-  const r1 = Math.max(0.01, top50[1].returnPct);
-  const sumR = r0 + r1;
-  const amounts = top50.map(() => MIN_PER_STOCK);
-  const add0 = Math.floor(disc * (r0 / sumR));
-  const add1 = Math.floor(disc * (r1 / sumR));
-  amounts[0] += add0;
-  amounts[1] += add1;
-  let rem = disc - add0 - add1;
-  while (rem > 0) {
-    amounts[r0 >= r1 ? 0 : 1]++;
-    rem--;
-  }
-  return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
 }
 
 function allocationsForStrategy(name: string, entries: PriceEntry[]): Allocation[] {
@@ -1427,6 +1719,8 @@ function allocationsForStrategy(name: string, entries: PriceEntry[]): Allocation
       return buildReturnProportional(entries);
     case "dual_concentrate":
       return buildDualConcentration(entries);
+    case "triple_concentrate":
+      return buildTripleConcentration(entries);
     default:
       return buildMaxConcentration(entries);
   }
@@ -1480,16 +1774,12 @@ async function fetchTopScore(): Promise<number | null> {
   return best;
 }
 
-function rowReturnPct(row: Record<string, unknown>): number | null {
-  return leaderboardRowReturnPct(row);
-}
-
 async function fetchMyBest(): Promise<number> {
   const teamId = process.env.CALA_TEAM_ID?.trim();
   if (!teamId) return 0;
   const got = await tryFetchCalaLeaderboardRows(FETCH_TIMEOUT_MS);
   if (!got) return 0;
-  const mine = got.rows.find(e => e.team_id === teamId);
+  const mine = got.rows.find((e) => leaderboardRowTeamId(e) === teamId);
   if (!mine) return 0;
   return leaderboardRowReturnPct(mine) ?? 0;
 }
@@ -1515,18 +1805,17 @@ async function printLeaderboardCli() {
     return;
   }
   const teamId = process.env.CALA_TEAM_ID?.trim();
-  const enriched = data
-    .map((row, i) => ({ row, i, pct: rowReturnPct(row) }))
-    .filter((x): x is typeof x & { pct: number } => x.pct !== null)
-    .sort((a, b) => b.pct - a.pct);
+  const benchSlug = process.env.CALA_BENCHMARK_TEAM_ID?.trim().toLowerCase() || "sourish";
+  const summary = summarizeLeaderboardForTeam(data, teamId ?? null, {
+    benchmarkTeamId: benchSlug,
+  });
+  const enriched = summary.enriched.map((x, i) => ({ row: x.row, i, pct: x.pct }));
 
   if (teamId) {
-    const idx = enriched.findIndex((x) => String(x.row.team_id ?? x.row.team ?? "") === teamId);
-    if (idx >= 0) {
-      const ours = enriched[idx]!.pct;
-      const top = enriched[0]!.pct;
+    if (summary.ourRank != null && summary.ourReturnPct != null) {
+      const ours = summary.ourReturnPct;
       console.log(
-        `\n  Your rank: ${idx + 1} / ${enriched.length}  |  return ${(ours >= 0 ? "+" : "") + ours.toFixed(2)}%  |  gap vs #1: ${(top - ours).toFixed(2)} pp`,
+        `\n  Your rank: ${summary.ourRank} / ${enriched.length}  |  return ${(ours >= 0 ? "+" : "") + ours.toFixed(2)}%  |  gap vs #1: ${(summary.gapToFirstPp ?? 0).toFixed(2)} pp`,
       );
     } else {
       console.log(`\n  CALA_TEAM_ID=${teamId} not found on this leaderboard snapshot (${enriched.length} row(s) with return %).`);
@@ -1540,18 +1829,57 @@ async function printLeaderboardCli() {
   console.log(`${"─".repeat(72)}`);
   for (let r = 0; r < Math.min(20, enriched.length); r++) {
     const { row, pct } = enriched[r];
-    const id = String(row.team_id ?? row.team ?? "?");
+    const id = leaderboardRowTeamId(row) || "?";
     const name = String(row.team_name ?? row.name ?? "");
     const label = name ? `${name} (${id})` : id;
     const mine = teamId && id === teamId ? "  ← you" : "";
     console.log(`  ${String(r + 1).padStart(4)}  ${(pct >= 0 ? "+" : "") + pct.toFixed(2).padStart(9)}%   ${label}${mine}`);
   }
   console.log(`${"═".repeat(72)}\n`);
+
+  appendCalaRunLog(DATA_DIR, {
+    phase: "leaderboard",
+    team_id: teamId ?? null,
+    rank: summary.ourRank,
+    our_return_pct: summary.ourReturnPct,
+    top_return_pct: summary.topReturnPct,
+    gap_to_first_pp: summary.gapToFirstPp,
+    benchmark_team_id: summary.benchmarkTeamId,
+    benchmark_return_pct: summary.benchmarkReturnPct,
+    gap_to_benchmark_pp: summary.gapToBenchmarkPp,
+    leaderboard_rows: enriched.length,
+  });
+  if (summary.benchmarkReturnPct != null && summary.ourReturnPct != null) {
+    console.log(
+      `  Benchmark "${benchSlug}": ${summary.benchmarkReturnPct >= 0 ? "+" : ""}${summary.benchmarkReturnPct.toFixed(2)}%  |  your gap vs ${benchSlug}: ${(summary.gapToBenchmarkPp ?? 0).toFixed(2)} pp`,
+    );
+  } else if (summary.benchmarkReturnPct != null && teamId && summary.ourReturnPct == null) {
+    console.log(
+      `  Benchmark "${benchSlug}": ${summary.benchmarkReturnPct >= 0 ? "+" : ""}${summary.benchmarkReturnPct.toFixed(2)}%  (set CALA_TEAM_ID to your team slug to compare)`,
+    );
+  }
 }
 
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
+
+  if (args.includes("--retry-bad")) {
+    const hoursArg = args.find(a => a.startsWith("--retry-bad-hours="));
+    const hours = hoursArg ? Number(hoursArg.split("=")[1]) : 0;
+    const retryable = retryableBadTickers(badTickerEntries, hours);
+    if (retryable.length === 0) {
+      console.log("No retryable bad tickers found.");
+    } else {
+      console.log(`♻️  Re-enabling ${retryable.length} bad ticker(s) for retry (failed >${hours}h ago):`);
+      console.log(`   ${retryable.join(", ")}`);
+      const retrySet = new Set(retryable.map(normSym));
+      for (const t of retrySet) badTickers.delete(t);
+      badTickerEntries = badTickerEntries.filter((e) => !retrySet.has(normSym(e.ticker)));
+      serializeBadTickerFile(BAD_TICKERS_PATH, badTickerEntries);
+    }
+    if (!args.includes("--harvest")) return;
+  }
 
   if (args.includes("--harvest")) {
     await harvest();
@@ -1559,6 +1887,7 @@ async function main() {
     await optimize(dryRun);
   } else if (args.includes("--show")) {
     const db = loadPriceDB();
+    maybeWarnStalePriceDb(db);
     console.log(`Price DB: ${Object.keys(db.prices).length} tickers (updated ${db.lastUpdated})`);
     showRankings(db);
   } else if (args.includes("--auto")) {
@@ -1573,8 +1902,13 @@ async function main() {
     console.log("  --show       Show cached rankings");
     console.log("  --leaderboard  Print live scoreboard (sorted by return)");
     console.log("  --auto       Continuous loop: harvest → optimize → repeat");
+    console.log("  --retry-bad  Re-enable all bad tickers for retry (combine with --harvest)");
+    console.log("  --retry-bad --retry-bad-hours=N  Only retry tickers that failed >N hours ago");
     console.log(
-      "  Env: CALA_LEADERBOARD_URL (+ auto /api/leaderboard on that host), CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL origin; CALA_ALLOW_SUBMIT=1 for live --optimize POST",
+      "  Env: CALA_LEADERBOARD_URL, CALA_LEADERBOARD_URLS, CALA_SUBMIT_URL; CALA_ALLOW_SUBMIT=1 for live --optimize POST",
+    );
+    console.log(
+      "  Harvest universe: CALA_EXTRA_TICKERS, CALA_HARVEST_CANDIDATE_FILES, CALA_MERGE_RESEARCH_CANDIDATES (≠0 merges data/research-harvest-candidates.json if present), CALA_HARVEST_MAX_BATCHES, CALA_PRICE_DB_WARN_STALE_HOURS",
     );
   }
 }
