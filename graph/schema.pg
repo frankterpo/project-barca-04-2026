@@ -17,6 +17,7 @@ node PortfolioRun {
     branch_label:       String
     benchmark_note:     String?
     portfolio_value_usd: F64
+    return_pct:         F64?
     updated_at:         String
 }
 

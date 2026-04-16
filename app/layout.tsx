@@ -41,6 +41,7 @@ export default function RootLayout({
               </div>
               <nav className="flex flex-wrap items-center gap-1" aria-label="Primary">
                 <NavLink href="/portfolio">Portfolio</NavLink>
+                <NavLink href="/graph">Graph</NavLink>
                 <NavLink href="/judge-mode">Judge Mode</NavLink>
               </nav>
             </div>

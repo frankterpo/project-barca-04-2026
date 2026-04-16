@@ -19,6 +19,7 @@ import {
   leaderboardRowReturnPct,
   tryFetchCalaLeaderboardRows,
 } from "../lib/cala";
+import { getOmnigraphClient, probeOmnigraphHealth } from "../lib/omnigraph/client";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -95,6 +96,132 @@ function savePersistedBadTickers(tickers: Set<string>) {
 
 async function fetchJsonWithTimeout<T>(url: string, init?: RequestInit, timeoutMs = FETCH_TIMEOUT_MS): Promise<T> {
   return fetchConvexEndpointJson<T>(url, init, timeoutMs);
+}
+
+// ── Omnigraph fire-and-forget sync ──────────────────────────────────
+
+const OMNIGRAPH_ENABLED = process.env.OMNIGRAPH_SYNC !== "0";
+let omnigraphHealthy: boolean | null = null;
+
+const CONVICTION_BAND_A_THRESHOLD = 50;
+const CONVICTION_BAND_B_THRESHOLD = 1;
+const OMNIGRAPH_BATCH_CONCURRENCY = 8;
+
+async function checkOmnigraphOnce(): Promise<boolean> {
+  if (omnigraphHealthy !== null) return omnigraphHealthy;
+  if (!OMNIGRAPH_ENABLED) { omnigraphHealthy = false; return false; }
+  omnigraphHealthy = await probeOmnigraphHealth({ timeoutMs: 2_000, retries: 0 });
+  if (omnigraphHealthy) console.log("🔗 Omnigraph connected — will sync companies & runs in background");
+  return omnigraphHealthy;
+}
+
+function convictionBand(weightPct: number): "A" | "B" | "C" {
+  if (weightPct > CONVICTION_BAND_A_THRESHOLD) return "A";
+  if (weightPct > CONVICTION_BAND_B_THRESHOLD) return "B";
+  return "C";
+}
+
+function todayDateTag(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Fire-and-forget: upsert companies from the price DB into Omnigraph.
+ * Uses batched concurrency to avoid N*5 sequential round-trips.
+ */
+function syncCompaniesToOmnigraph(db: PriceDB): void {
+  void (async () => {
+    if (!(await checkOmnigraphOnce())) return;
+    const og = getOmnigraphClient();
+    const entries = Object.values(db.prices);
+    let ok = 0;
+    let fail = 0;
+    const dateTag = todayDateTag();
+
+    const syncOne = async (e: PriceEntry) => {
+      try {
+        await og.change("upsert_company", { ticker: e.ticker, name: e.ticker, sector: null });
+        await og.change("upsert_financial_metric", {
+          metric_id: `${e.ticker}:purchase_price:apr15`,
+          metric_name: "purchase_price",
+          period: "apr15_2025",
+          value: e.purchasePrice,
+          cadence: "i", unit: "USD", cala_metric_uuid: null,
+        });
+        await og.change("link_metric", { ticker: e.ticker, metric_id: `${e.ticker}:purchase_price:apr15` });
+        await og.change("upsert_financial_metric", {
+          metric_id: `${e.ticker}:eval_price:${dateTag}`,
+          metric_name: "eval_price",
+          period: dateTag,
+          value: e.evalPrice,
+          cadence: "i", unit: "USD", cala_metric_uuid: null,
+        });
+        await og.change("link_metric", { ticker: e.ticker, metric_id: `${e.ticker}:eval_price:${dateTag}` });
+        if (e.returnPct != null) {
+          await og.change("upsert_financial_metric", {
+            metric_id: `${e.ticker}:return_pct:${dateTag}`,
+            metric_name: "return_pct",
+            period: dateTag,
+            value: e.returnPct,
+            cadence: "i", unit: "%", cala_metric_uuid: null,
+          });
+          await og.change("link_metric", { ticker: e.ticker, metric_id: `${e.ticker}:return_pct:${dateTag}` });
+        }
+        ok++;
+      } catch (err) {
+        fail++;
+        if (fail <= 3) console.log(`🔗 Omnigraph sync error [${e.ticker}]: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+
+    for (let i = 0; i < entries.length; i += OMNIGRAPH_BATCH_CONCURRENCY) {
+      await Promise.allSettled(entries.slice(i, i + OMNIGRAPH_BATCH_CONCURRENCY).map(syncOne));
+    }
+    console.log(`🔗 Omnigraph sync: ${ok} companies upserted, ${fail} failed`);
+  })();
+}
+
+/**
+ * Fire-and-forget: record an optimize submission as a PortfolioRun in Omnigraph.
+ */
+function syncPortfolioRunToOmnigraph(
+  runId: string,
+  strategyName: string,
+  totalValue: number,
+  returnPct: number,
+  allocs: Allocation[],
+  db: PriceDB,
+): void {
+  void (async () => {
+    if (!(await checkOmnigraphOnce())) return;
+    const og = getOmnigraphClient();
+    try {
+      await og.change("create_portfolio_run", {
+        run_id: runId,
+        branch_label: strategyName,
+        portfolio_value_usd: totalValue,
+        return_pct: returnPct,
+        updated_at: new Date().toISOString(),
+      });
+      const holdingTasks = allocs.map(async (a) => {
+        const p = db.prices[a.nasdaq_code];
+        const weightPct = (a.amount / TOTAL_BUDGET) * 100;
+        await og.change("upsert_company", {
+          ticker: a.nasdaq_code, name: p?.ticker ?? a.nasdaq_code, sector: null,
+        });
+        await og.change("link_holding", {
+          run_id: runId, ticker: a.nasdaq_code,
+          weight_pct: weightPct, conviction_band: convictionBand(weightPct),
+        });
+      });
+      for (let i = 0; i < holdingTasks.length; i += OMNIGRAPH_BATCH_CONCURRENCY) {
+        await Promise.allSettled(holdingTasks.slice(i, i + OMNIGRAPH_BATCH_CONCURRENCY));
+      }
+      console.log(`🔗 Omnigraph: run ${runId} synced (${allocs.length} holdings, return ${returnPct.toFixed(2)}%)`);
+    } catch (err) {
+      console.log(`🔗 Omnigraph: run sync failed — ${err instanceof Error ? err.message : String(err)}`);
+    }
+  })();
 }
 
 // ── Massive ticker universe to probe ─────────────────────────────────
@@ -957,6 +1084,8 @@ async function harvest() {
     }
   }
 
+  syncCompaniesToOmnigraph(db);
+
   const elapsed = ((Date.now() - t0) / 1000).toFixed(0);
   console.log(`\n✅ Harvest complete: ${Object.keys(db.prices).length} total prices (${totalNew} new) in ${elapsed}s`);
   console.log(`   Bad tickers (persisted): ${badTickers.size}`);
@@ -1124,6 +1253,9 @@ async function optimize(dryRun: boolean) {
     }
   }
   savePriceDB(db);
+
+  const runId = `${bestStrategy.name}_${Date.now()}`;
+  syncPortfolioRunToOmnigraph(runId, bestStrategy.name, value, ret, bestStrategy.allocs, db);
 }
 
 function buildMaxConcentration(

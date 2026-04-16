@@ -67,7 +67,7 @@ query all_runs()
   @description("List all portfolio runs")
 {
     match { $r: PortfolioRun }
-    return { $r.run_id, $r.branch_label, $r.portfolio_value_usd, $r.updated_at }
+    return { $r.run_id, $r.branch_label, $r.portfolio_value_usd, $r.return_pct, $r.updated_at }
     order { $r.updated_at desc }
 }
 
@@ -200,7 +200,7 @@ query link_competes($ticker_a: String, $ticker_b: String)
 
 query create_portfolio_run(
     $run_id: String, $branch_label: String,
-    $portfolio_value_usd: F64, $updated_at: String
+    $portfolio_value_usd: F64, $return_pct: F64, $updated_at: String
 )
   @description("Create a new portfolio run node")
 {
@@ -208,6 +208,7 @@ query create_portfolio_run(
         run_id:              $run_id,
         branch_label:        $branch_label,
         portfolio_value_usd: $portfolio_value_usd,
+        return_pct:          $return_pct,
         updated_at:          $updated_at
     }
 }
