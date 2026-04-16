@@ -33,14 +33,16 @@ export default function RootLayout({
           <header className="border-b border-border-subtle bg-bg-elevated/80 backdrop-blur">
             <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
               <div className="flex items-center gap-3">
-                <div className="h-8 w-8 rounded-md bg-accent/20 ring-1 ring-accent/40" />
+                <div className="h-8 w-8 rounded-md bg-accent/20 ring-1 ring-accent/40 flex items-center justify-center text-accent text-sm font-bold">N</div>
                 <div>
-                  <div className="text-sm font-semibold tracking-tight">Lobster IC</div>
-                  <div className="text-xs text-text-muted">Committee demo (mock data)</div>
+                  <div className="text-sm font-semibold tracking-tight">Team Nuke</div>
+                  <div className="text-xs text-text-muted">Cala Trading Bot</div>
                 </div>
               </div>
               <nav className="flex flex-wrap items-center gap-1" aria-label="Primary">
+                <NavLink href="/">Dashboard</NavLink>
                 <NavLink href="/portfolio">Portfolio</NavLink>
+                <NavLink href="/graph">Graph</NavLink>
                 <NavLink href="/judge-mode">Judge Mode</NavLink>
               </nav>
             </div>
