@@ -6,9 +6,9 @@ export default function Home() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-2xl font-bold tracking-tight">Command Center</h1>
+        <h1 className="text-2xl font-bold tracking-tight">Team Nuke</h1>
         <p className="mt-1 text-sm text-text-secondary">
-          Live Cala leaderboard &middot; Fire harvest runs &middot; Track Team Nuke
+          Portfolio deep dive &middot; Fire harvest sessions &middot; Track performance
         </p>
       </div>
       <TradingDashboard />
