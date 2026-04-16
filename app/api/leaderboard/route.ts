@@ -1,44 +1,64 @@
 import { NextResponse } from "next/server";
-import { tryFetchCalaLeaderboardRows, leaderboardRowReturnPct } from "@/lib/cala";
-import { parseLenientJson } from "@/lib/cala/convex-http";
 
 export const dynamic = "force-dynamic";
 
-const DIRECT_CONVEX_URL = "https://different-cormorant-663.convex.site/api/leaderboard";
+const CONVEX_CLOUD_URL = "https://different-cormorant-663.convex.cloud/api/query";
+const INITIAL_INVESTMENT = 1_000_000;
+
+interface ConvexRow {
+  teamName?: string;
+  teamSlug?: string;
+  modelAgentName?: string;
+  modelAgentVersion?: string;
+  totalValue?: number;
+  totalInvested?: number;
+  transactionCount?: number;
+  isBaseline?: boolean;
+  submittedAt?: number;
+  teamLogoUrl?: string | null;
+}
 
 export async function GET() {
-  let result = await tryFetchCalaLeaderboardRows(8_000);
+  try {
+    const res = await fetch(CONVEX_CLOUD_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: "submissions:leaderboard", args: {} }),
+      signal: AbortSignal.timeout(10_000),
+    });
 
-  if (!result) {
-    try {
-      const res = await fetch(DIRECT_CONVEX_URL, {
-        headers: { Accept: "application/json" },
-        redirect: "follow",
-        signal: AbortSignal.timeout(8_000),
-      });
-      const text = await res.text();
-      const data = parseLenientJson(text) as Record<string, unknown>[];
-      if (Array.isArray(data) && data.length > 0) {
-        result = { url: DIRECT_CONVEX_URL, rows: data };
-      }
-    } catch {
-      // fallback failed
+    const json = await res.json();
+
+    if (json.status !== "success" || !Array.isArray(json.value)) {
+      return NextResponse.json(
+        { ok: false, rows: [], error: json.errorMessage ?? "Convex query failed" },
+        { status: 502 },
+      );
     }
+
+    const rows = (json.value as ConvexRow[]).map((r) => {
+      const invested = r.totalInvested ?? INITIAL_INVESTMENT;
+      const value = r.totalValue ?? invested;
+      const returnPct = invested > 0 ? ((value - invested) / invested) * 100 : 0;
+
+      return {
+        team_id: r.teamSlug ?? r.teamName ?? "unknown",
+        team_name: r.teamName ?? r.teamSlug ?? "unknown",
+        model_agent_version: r.modelAgentVersion ?? "—",
+        num_transactions: r.transactionCount ?? 0,
+        total_value: value,
+        return_pct: returnPct,
+        is_baseline: r.isBaseline ?? false,
+        submitted_at: r.submittedAt ?? null,
+        logo_url: r.teamLogoUrl ?? null,
+      };
+    });
+
+    rows.sort((a, b) => b.return_pct - a.return_pct);
+
+    return NextResponse.json({ ok: true, rows });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    return NextResponse.json({ ok: false, rows: [], error: msg }, { status: 502 });
   }
-
-  if (!result) {
-    return NextResponse.json({ ok: false, rows: [], error: "Leaderboard unreachable" }, { status: 502 });
-  }
-
-  const rows = result.rows.map((r) => ({
-    team_id: r.team_id ?? r.model_agent_version ?? "unknown",
-    model_agent_version: r.model_agent_version ?? "—",
-    num_transactions: typeof r.num_transactions === "number" ? r.num_transactions : 0,
-    total_value: typeof r.total_value === "number" ? r.total_value : 0,
-    return_pct: leaderboardRowReturnPct(r),
-  }));
-
-  rows.sort((a, b) => (b.return_pct ?? -Infinity) - (a.return_pct ?? -Infinity));
-
-  return NextResponse.json({ ok: true, rows });
 }

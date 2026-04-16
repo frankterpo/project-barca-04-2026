@@ -42,3 +42,4 @@ yarn-error.log*
 
 # Lobster IC generated fixtures (demo:seed)
 data/
+.vercel

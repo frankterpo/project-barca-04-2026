@@ -4,10 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 interface LeaderboardRow {
   team_id: string;
+  team_name: string;
   model_agent_version: string;
   num_transactions: number;
   total_value: number;
-  return_pct: number | null;
+  return_pct: number;
+  is_baseline: boolean;
+  submitted_at: number | null;
+  logo_url: string | null;
 }
 
 type HarvestState = "idle" | "running" | "done" | "error";
@@ -30,28 +34,35 @@ function rankBadge(i: number) {
   return <span className="text-xs text-text-muted tabular-nums">#{i + 1}</span>;
 }
 
+function isTeamNuke(r: LeaderboardRow) {
+  return r.team_name?.toLowerCase().includes("nuke") || r.team_id?.toLowerCase().includes("nuke");
+}
+
 function ReturnBar({ rows }: { rows: LeaderboardRow[] }) {
-  const valid = rows.filter((r) => r.return_pct != null).slice(0, 20);
+  const valid = rows.slice(0, 20);
   if (valid.length < 2) return null;
-  const max = Math.max(...valid.map((r) => Math.abs(r.return_pct!)));
+  const max = Math.max(...valid.map((r) => Math.abs(r.return_pct)));
   const scale = max || 1;
 
   return (
-    <div className="space-y-1">
+    <div className="space-y-1.5">
       {valid.map((r, i) => {
-        const pct = r.return_pct!;
+        const pct = r.return_pct;
         const w = Math.max((Math.abs(pct) / scale) * 100, 1);
-        const isUs = r.model_agent_version?.toLowerCase().includes("nuke") ||
-          r.team_id?.toLowerCase().includes("nuke");
-        const color = isUs
+        const us = isTeamNuke(r);
+        const color = us
           ? "bg-accent"
-          : pct >= 0
-            ? "bg-positive/60"
-            : "bg-negative/60";
+          : r.is_baseline
+            ? "bg-text-muted/40"
+            : pct >= 0
+              ? "bg-positive/60"
+              : "bg-negative/60";
         return (
           <div key={r.team_id + i} className="flex items-center gap-2 text-xs">
             <div className="w-6 text-right shrink-0">{rankBadge(i)}</div>
-            <div className="w-28 truncate text-text-secondary font-mono shrink-0">{r.model_agent_version}</div>
+            <div className={`w-28 truncate font-mono shrink-0 ${us ? "text-accent font-semibold" : "text-text-secondary"}`}>
+              {r.team_name}
+            </div>
             <div className="flex-1 h-5 relative rounded-sm overflow-hidden bg-bg-muted/40">
               <div
                 className={`absolute inset-y-0 left-0 ${color} rounded-sm transition-all duration-500`}
@@ -135,11 +146,7 @@ export function TradingDashboard() {
     if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [harvestLog]);
 
-  const ourTeam = rows.find(
-    (r) =>
-      r.model_agent_version?.toLowerCase().includes("nuke") ||
-      r.team_id?.toLowerCase().includes("nuke"),
-  );
+  const ourTeam = rows.find(isTeamNuke);
   const ourRank = ourTeam ? rows.indexOf(ourTeam) + 1 : null;
   const leader = rows[0];
 
@@ -346,7 +353,7 @@ export function TradingDashboard() {
             <thead className="bg-bg-muted/60 text-xs uppercase tracking-wide text-text-muted">
               <tr>
                 <th className="px-4 py-3 w-12">#</th>
-                <th className="px-4 py-3">Team / Agent</th>
+                <th className="px-4 py-3">Team</th>
                 <th className="px-4 py-3 text-right">Stocks</th>
                 <th className="px-4 py-3 text-right">Portfolio Value</th>
                 <th className="px-4 py-3 text-right">Return</th>
@@ -354,19 +361,19 @@ export function TradingDashboard() {
             </thead>
             <tbody className="divide-y divide-border-subtle">
               {rows.map((r, i) => {
-                const isUs = r.model_agent_version?.toLowerCase().includes("nuke") ||
-                  r.team_id?.toLowerCase().includes("nuke");
+                const us = isTeamNuke(r);
                 return (
-                  <tr key={r.team_id + i} className={`${isUs ? "bg-accent/5" : ""} hover:bg-bg-muted/40`}>
+                  <tr key={r.team_id + i} className={`${us ? "bg-accent/5" : ""} hover:bg-bg-muted/40`}>
                     <td className="px-4 py-3">{rankBadge(i)}</td>
                     <td className="px-4 py-3">
-                      <div className={`font-mono text-sm ${isUs ? "text-accent font-semibold" : "text-text-primary"}`}>
-                        {r.model_agent_version}
+                      <div className={`text-sm ${us ? "text-accent font-semibold" : "text-text-primary"}`}>
+                        {r.team_name}
                       </div>
+                      <div className="text-xs text-text-muted font-mono">{r.model_agent_version}</div>
                     </td>
                     <td className="px-4 py-3 text-right tabular-nums text-text-secondary">{r.num_transactions}</td>
                     <td className="px-4 py-3 text-right tabular-nums text-text-primary">{fmtUsd(r.total_value)}</td>
-                    <td className={`px-4 py-3 text-right tabular-nums font-semibold ${(r.return_pct ?? 0) >= 0 ? "text-positive" : "text-negative"}`}>
+                    <td className={`px-4 py-3 text-right tabular-nums font-semibold ${r.return_pct >= 0 ? "text-positive" : "text-negative"}`}>
                       {fmtPct(r.return_pct)}
                     </td>
                   </tr>
