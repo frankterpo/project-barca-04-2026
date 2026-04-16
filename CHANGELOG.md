@@ -16,6 +16,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/price-harvester.ts`: use `normSym` consistently for bad-ticker dedup and batch membership; raise `HARVEST_RETRY_LIMIT` to 28 for flaky vendor batches.
+
 ### Cala / Convex
 
 - Leaderboard: `GET /api/leaderboard` and `pnpm tsx scripts/price-harvester.ts --leaderboard` use the same Convex `submissions:leaderboard` query path. Override the deployment with `CALA_CONVEX_QUERY_URL`, or derive from `CALA_SUBMIT_URL` / `CALA_LEADERBOARD_URL` (`.convex.site` → `.convex.cloud`). See `.env.example` and `docs/OPERATOR.md`.
