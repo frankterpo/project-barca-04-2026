@@ -918,6 +918,78 @@ const ALL_TICKERS = [
 
   // === WAVE 8: SPAC de-SPAC mergers with ticker changes ===
   "HYAC", "GIXXU", "GIWWU",
+
+  // === WAVE 9: POST-APR-15-2025 IPOs — API may give anomalous purchase price ===
+  // Oct 2025 IPO, $4→$172 = potential 10,000x+ if API returns near-zero Apr 15 price
+  "TCGL",
+  // Major 2025 IPOs after April 15
+  "CHYM", "BLLN", "ANDG", "MDLN", "FRMI", "CDNL", "CHA", "WLTH",
+  "AERO", "AII", "SMA", "GLOO",
+  // 2025 H2 IPOs — biotech, tech, fintech
+  "SION", "BBNX", "KMTS", "FIGR", "CRCL", "STUB", "OMDA",
+  // 2026 IPOs — very recent, should definitely have no Apr 2025 price
+  "MANE", "SGP", "PAYP", "BOBS", "OFRM", "BTGO", "EQPT", "AKTS",
+  "YSS", "HMH", "JAN", "MMED", "MWH", "FPS", "PICS", "APC",
+  // More 2025 late-year IPOs
+  "SCPQ", "SVAQ", "BEBE", "ADAC", "CCXI", "LMRI",
+  // High-growth 2025 IPOs — any that mooned from low IPO prices
+  "MGRT", "SDST", "BFAM", "NUVB", "HIMS",
+  // Chinese nano-caps that IPO'd on NASDAQ after April 2025
+  "SDM", "TDIC", "EDHL", "DRCT", "BAOS", "VSME",
+
+  // === WAVE 10: STATMUSE EXTREME MOVERS (53,000%+ in 4 months) ===
+  "JNVR",  // Janover Inc, +1,901% since Jan 2025
+  "ASST",  // Asset Entities, +840%
+  "TOI",   // Oncology Institute, +674%
+  "GITS",  // Global Interactive Technologies, +568%
+  "DOMH",  // Dominari, +518%
+  "KDLY",  // Kindly MD, +517%
+  "OCG",   // Oriental Culture, +451%
+  "NUTX",  // Nutex Health, +396%
+  "RGLS",  // Regulus Therapeutics, +390%
+  "ABTS",  // Abits, +386%
+  "TDUP",  // ThredUp, +381%
+  "YOSH",  // Yoshiharu Global, +346%
+  "MNDR",  // Mobile-health Network, +322%
+  "CURI",  // CuriosityStream, +298%
+  "FNGR",  // FingerMotion, +269%
+  "NTCL",  // Netclass Technology, +254%
+  "DBVT",  // DBV Technologies, +249%
+  "CRVO",  // CervoMed, +247%
+  "NXTT",  // Next Technology, +1,069% in 1 month
+  "PNBK",  // Patriot National Bancorp, +356% in 1 month
+  "UPXI",  // Upexi, +312%
+  "AREN",  // Arena, +297%
+  "BATL",  // Battalion Oil, +674% in 1 month
+  "EDSA",  // Edesa Biotech, +527%
+  "TURB",  // Turbo Energy, +396%
+  "ANTX",  // AN2 Therapeutics, +385%
+  "RXT",   // Rackspace Technology
+  "XWEL",  // XWELL
+  "SGN",   // Signing Day Sports
+  "CDIO",  // Cardio Diagnostics
+  "MOBX",  // Mobix Labs
+  "SNSE",  // Sensei Biotherapeutics
+  "TMDE",  // TMD Energy
+  "TWNP",  // Twin Hospitality
+  "TPET",  // Trio Petroleum
+  "ATOM",  // Atomera
+  "NAMM",  // Namib Minerals
+  "LVLU",  // Lulu's Fashion Lounge
+  "ALMS",  // Alumis
+  "WATT",  // Energous
+  "ANPA",  // Rich Sparkle Holdings
+  "SDOT",  // Sadot
+  "ZNTL",  // Zentalis Pharmaceuticals
+  "MRNO",  // Murano Global Investments
+  "RPID",  // Rapid Micro Biosystems
+  "DVLT",  // Datavault AI
+  "RCKT",  // Rocket Pharmaceuticals
+  "EVTV",  // Envirotech Vehicles, +620%
+  "YI",    // 111 Inc
+  "IBRX",  // Immunitybio
+  "ERAS",  // Erasca
+  "PMN",   // ProMIS Neurosciences
 ];
 
 /** Optional: merge tickers from research-agent (`data/research-harvest-candidates.json`) and CALA_HARVEST_CANDIDATE_FILES. */
@@ -1444,11 +1516,9 @@ async function optimize(dryRun: boolean) {
       console.error(`   ❌ Failed: ${msg}`);
       const rejected = extractBadTicker(msg);
       if (rejected && attempt < 5) {
-        console.log(`   🔄 Removing rejected ticker "${rejected}" and retrying...`);
+        console.log(`   🔄 Skipping rejected ticker "${rejected}" and retrying...`);
         badTickers.add(rejected);
         savePersistedBadTickers(badTickers);
-        if (db.prices[rejected]) delete db.prices[rejected];
-        savePriceDB(db);
         const cleaned = Object.values(db.prices)
           .filter(e => !badTickers.has(e.ticker))
           .sort((a, b) => b.returnPct - a.returnPct);
