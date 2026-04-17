@@ -128,6 +128,7 @@ export class OmnigraphClient {
       const res = await fetch(`${this.url}/healthz`, {
         method: "GET",
         headers: this.headers(),
+        signal: AbortSignal.timeout(this.timeoutMs),
       });
       return res.ok;
     } catch {

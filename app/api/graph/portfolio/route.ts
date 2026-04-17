@@ -4,7 +4,7 @@ import { join } from "path";
 
 import { getOmnigraphClient, type OmnigraphReadResult } from "@/lib/omnigraph";
 import { probeOmnigraphHealth } from "@/lib/omnigraph/client";
-import { isSupabaseConfigured, getAllPrices } from "@/lib/supabase";
+import { getPricesForDashboard, isSupabaseConfigured } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
 
@@ -112,7 +112,7 @@ function tryLocalPriceDb(): Response | null {
 async function trySupabase(): Promise<Response | null> {
   if (!isSupabaseConfigured()) return null;
   try {
-    const rows = await getAllPrices();
+    const { rows, badTickersExcluded, priceView, allQuarantined } = await getPricesForDashboard();
     if (rows.length === 0) return null;
 
     const winners = rows.filter((r) => (r.return_pct ?? 0) > 0);
@@ -123,6 +123,12 @@ async function trySupabase(): Promise<Response | null> {
     return NextResponse.json({
       ok: true,
       source: "supabase",
+      priceView,
+      badTickersExcluded,
+      allQuarantined,
+      portfolioNote: allQuarantined
+        ? "All tickers are in bad_tickers — showing full prices table. Trim bad_tickers or set PORTFOLIO_INCLUDE_BAD_TICKERS=1 for intentional full stats."
+        : undefined,
       lastUpdated: rows[0]?.harvested_at ?? null,
       totalTickers: rows.length,
       winnersCount: winners.length,

@@ -33,6 +33,10 @@ For the scaffold, you only need `APP_URL` (optional). Real keys land in M2–M4 
 
 **Live submission:** Portfolio POSTs from `scripts/price-harvester.ts --optimize` (without `--dry-run`) and from `scripts/autonomous-runner.ts` require **`CALA_ALLOW_SUBMIT=1`** when you intentionally want real submits. The autonomous runner also only submits when the scored return beats leaderboard #1; without `CALA_ALLOW_SUBMIT=1` it logs and skips.
 
+**Supabase `prices` + actionable stats:** With `SUPABASE_CONNECTION` set, `/api/graph/portfolio` reads Postgres `prices` and, by default, **excludes tickers listed in `bad_tickers`** so green/red counts reflect an actionable universe. The dashboard shows `N quarantined` under Holdings when any rows were excluded. Set `PORTFOLIO_INCLUDE_BAD_TICKERS=1` for full-table stats (audit). If every ticker were quarantined, the API still returns all rows and a warning banner.
+
+**Quarantine deep losers:** `pnpm quarantine:losers` dry-runs; `pnpm quarantine:losers --apply` inserts into `bad_tickers` for tickers with `return_pct` ≤ threshold (default **-85**, env `CALA_QUARANTINE_RETURN_PCT` or `--threshold=`). Add `--delete-prices` to remove those rows from `prices` after quarantine.
+
 **Iteration (Cala / gstack-style):** After each competitor round run `pnpm tsc --noEmit` and `pnpm lint` and fix regressions. For larger design changes, capture decisions in a short `PLAN.md` (or Cursor plan mode) and run `/gstack-plan-eng-review` on it; optional `/review` or `/gstack-review` on the diff before merge.
 
 API routes available after startup:

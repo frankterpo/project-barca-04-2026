@@ -7,15 +7,16 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "NODE_OPTIONS=--disable-warning=ExperimentalWarning vitest run",
+    "test:watch": "NODE_OPTIONS=--disable-warning=ExperimentalWarning vitest",
     "lint": "eslint",
     "demo:seed": "tsx scripts/demo-seed.ts",
     "agent:research": "tsx scripts/research-agent.ts",
     "agent:submit": "tsx scripts/submit-portfolio.ts",
     "agent:run": "tsx scripts/autonomous-runner.ts --once",
     "agent:loop": "tsx scripts/autonomous-runner.ts",
-    "agent:run-remote": "tsx scripts/trigger-research-job.ts"
+    "agent:run-remote": "tsx scripts/trigger-research-job.ts",
+    "quarantine:losers": "tsx scripts/quarantine-deep-losers.ts"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.7",

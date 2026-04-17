@@ -97,6 +97,45 @@ export async function getAllPrices(): Promise<PriceRow[]> {
   return res.rows;
 }
 
+/**
+ * Prices for the trading dashboard: by default drops rows whose ticker is in `bad_tickers`
+ * so win/loss stats reflect an “actionable” universe. Set `PORTFOLIO_INCLUDE_BAD_TICKERS=1`
+ * to include every row (legacy / audit).
+ */
+export async function getPricesForDashboard(): Promise<{
+  rows: PriceRow[];
+  badTickersExcluded: number;
+  priceView: "full" | "actionable";
+  /**
+   * Every row matched `bad_tickers` — we still return the full `prices` set so the UI is not empty;
+   * `badTickersExcluded` equals total rows (intent to exclude all). See `portfolioNote` on the API.
+   */
+  allQuarantined: boolean;
+}> {
+  const all = await getAllPrices();
+  if (process.env.PORTFOLIO_INCLUDE_BAD_TICKERS === "1") {
+    return { rows: all, badTickersExcluded: 0, priceView: "full", allQuarantined: false };
+  }
+  const badList = await getBadTickers();
+  const bad = new Set(badList.map((t) => t.trim().toUpperCase()).filter(Boolean));
+  const rows = all.filter((r) => !bad.has(r.ticker.trim().toUpperCase()));
+  const allQuarantined = all.length > 0 && rows.length === 0;
+  if (allQuarantined) {
+    return {
+      rows: all,
+      badTickersExcluded: all.length,
+      priceView: "actionable",
+      allQuarantined: true,
+    };
+  }
+  return {
+    rows,
+    badTickersExcluded: all.length - rows.length,
+    priceView: "actionable",
+    allQuarantined: false,
+  };
+}
+
 export async function getPriceCount(): Promise<number> {
   const res = await query<{ count: string }>("SELECT count(*) FROM prices");
   return parseInt(res.rows[0].count, 10);
@@ -104,11 +143,13 @@ export async function getPriceCount(): Promise<number> {
 
 // --------------- Bad Tickers ---------------
 
-export async function addBadTicker(ticker: string): Promise<void> {
-  await query(
+/** Returns true if a new row was inserted (false if ticker was already in `bad_tickers`). */
+export async function addBadTicker(ticker: string): Promise<boolean> {
+  const res = await query(
     "INSERT INTO bad_tickers (ticker) VALUES ($1) ON CONFLICT DO NOTHING",
     [ticker],
   );
+  return (res.rowCount ?? 0) > 0;
 }
 
 export async function getBadTickers(): Promise<string[]> {
@@ -122,6 +163,15 @@ export async function isBadTicker(ticker: string): Promise<boolean> {
     [ticker],
   );
   return parseInt(res.rows[0].count, 10) > 0;
+}
+
+/** Remove price rows (e.g. after quarantining tickers). Returns rows deleted. */
+export async function deletePricesByTickers(tickers: string[]): Promise<number> {
+  if (tickers.length === 0) return 0;
+  const norm = [...new Set(tickers.map((t) => t.trim().toUpperCase()).filter(Boolean))];
+  if (norm.length === 0) return 0;
+  const res = await query("DELETE FROM prices WHERE ticker = ANY($1::text[])", [norm]);
+  return res.rowCount ?? 0;
 }
 
 // --------------- Runs ---------------

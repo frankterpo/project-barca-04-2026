@@ -28,7 +28,7 @@ interface Ticker {
 
 interface PortfolioData {
   ok: boolean;
-  source?: "omnigraph" | "local";
+  source?: "omnigraph" | "local" | "supabase";
   lastUpdated: string;
   totalTickers: number;
   winnersCount: number;
@@ -37,6 +37,11 @@ interface PortfolioData {
   bestPerformer: Ticker | null;
   worstPerformer: Ticker | null;
   tickers: Ticker[];
+  /** Rows excluded from stats (tickers in `bad_tickers`). */
+  badTickersExcluded?: number;
+  priceView?: "full" | "actionable";
+  allQuarantined?: boolean;
+  portfolioNote?: string;
 }
 
 type HarvestState = "idle" | "running" | "done" | "error";
@@ -212,6 +217,7 @@ export function TradingDashboard() {
   const [judgeAnswer, setJudgeAnswer] = useState<JudgeAnswer | null>(null);
   const [judgeLoading, setJudgeLoading] = useState(false);
   const [judgeHoldingsLoading, setJudgeHoldingsLoading] = useState(false);
+  const [judgeCompaniesMessage, setJudgeCompaniesMessage] = useState<string | null>(null);
 
   /* ── Data fetching ─────────────────────────────────────── */
 
@@ -249,6 +255,15 @@ export function TradingDashboard() {
       const sorted = [...holdings].sort((a, b) => b.returnPct - a.returnPct);
       const winners = sorted.filter((t) => t.returnPct > 0);
 
+      const badEx =
+        typeof json.badTickersExcluded === "number" && Number.isFinite(json.badTickersExcluded)
+          ? json.badTickersExcluded
+          : undefined;
+      const priceView =
+        json.priceView === "full" || json.priceView === "actionable" ? json.priceView : undefined;
+      const allQuarantined = Boolean(json.allQuarantined);
+      const portfolioNote = typeof json.portfolioNote === "string" ? json.portfolioNote : undefined;
+
       setPortfolio({
         ok: true,
         source: json.source,
@@ -262,21 +277,12 @@ export function TradingDashboard() {
         bestPerformer: sorted[0] ?? null,
         worstPerformer: sorted[sorted.length - 1] ?? null,
         tickers: sorted,
+        badTickersExcluded: badEx,
+        priceView,
+        allQuarantined,
+        portfolioNote,
       });
     } catch {}
-  }, []);
-
-  const fetchJudgeCompanies = useCallback(async () => {
-    setJudgeHoldingsLoading(true);
-    try {
-      const res = await fetch("/api/judge-mode/companies");
-      const json = await res.json() as { holdings?: Holding[] };
-      if (json.holdings && json.holdings.length > 0) {
-        setJudgeHoldings(json.holdings);
-        setJudgeTicker((t) => t || json.holdings![0]?.ticker || "");
-      }
-    } catch {}
-    setJudgeHoldingsLoading(false);
   }, []);
 
   useEffect(() => {
@@ -285,12 +291,63 @@ export function TradingDashboard() {
     return () => clearInterval(id);
   }, [fetchTeamNuke, fetchPortfolio]);
 
-  // Lazy-load judge data when tab is selected
+  /** Judge tab: load Omnigraph-backed company list (bounded time; Strict Mode–safe). */
   useEffect(() => {
-    if (tab === "judge" && judgeHoldings.length === 0 && !judgeHoldingsLoading) {
-      fetchJudgeCompanies();
-    }
-  }, [tab, judgeHoldings.length, judgeHoldingsLoading, fetchJudgeCompanies]);
+    if (tab !== "judge") return;
+
+    let active = true;
+    const ac = new AbortController();
+    const maxMs = 25_000;
+    const deadline = setTimeout(() => ac.abort(), maxMs);
+
+    setJudgeHoldingsLoading(true);
+    fetch("/api/judge-mode/companies", { signal: ac.signal })
+      .then(async (r) => {
+        if (!r.ok) {
+          if (active && !ac.signal.aborted) {
+            setJudgeCompaniesMessage(`Companies request failed (${r.status}).`);
+          }
+          return;
+        }
+        let json: { holdings?: Holding[]; message?: string };
+        try {
+          json = (await r.json()) as { holdings?: Holding[]; message?: string };
+        } catch {
+          if (active && !ac.signal.aborted) {
+            setJudgeCompaniesMessage("Invalid JSON from /api/judge-mode/companies.");
+          }
+          return;
+        }
+        if (!active || ac.signal.aborted) return;
+        const msg = json.message;
+        if (typeof msg === "string") {
+          setJudgeCompaniesMessage(msg);
+        }
+        if (Array.isArray(json.holdings)) {
+          setJudgeHoldings(json.holdings);
+          if (json.holdings.length > 0) {
+            setJudgeTicker((t) => t || json.holdings![0]?.ticker || "");
+          }
+        }
+      })
+      .catch(() => {
+        if (active && !ac.signal.aborted) {
+          setJudgeHoldings([]);
+          setJudgeCompaniesMessage("Could not load companies (network error or timeout).");
+        }
+      })
+      .finally(() => {
+        clearTimeout(deadline);
+        if (active) setJudgeHoldingsLoading(false);
+      });
+
+    return () => {
+      active = false;
+      clearTimeout(deadline);
+      ac.abort();
+      setJudgeHoldingsLoading(false);
+    };
+  }, [tab]);
 
   // Fetch judge answer when ticker/preset changes
   useEffect(() => {
@@ -402,6 +459,23 @@ export function TradingDashboard() {
       return sortDir === "desc" ? -cmp : cmp;
     });
   }, [portfolio, filter, sortKey, sortDir]);
+
+  const holdingsStatSub = useMemo(() => {
+    if (!portfolio) return "";
+    const base = `${portfolio.winnersCount} green · ${portfolio.losersCount} red`;
+    const ex = portfolio.badTickersExcluded ?? 0;
+    if (ex > 0 && !portfolio.allQuarantined) {
+      return `${base} · ${ex} quarantined`;
+    }
+    return base;
+  }, [portfolio]);
+
+  const updatedStatSub = useMemo(() => {
+    if (!portfolio?.source) return undefined;
+    const parts: string[] = [portfolio.source];
+    if (portfolio.priceView === "actionable") parts.push("actionable");
+    return parts.join(" · ");
+  }, [portfolio]);
 
   /* ── Loading state ─────────────────────────────────────── */
 
@@ -542,12 +616,21 @@ export function TradingDashboard() {
       {/* ── Portfolio Stats ──────────────────────────────── */}
       {portfolio && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          <StatCard label="Holdings" value={String(portfolio.totalTickers)} sub={`${portfolio.winnersCount} green · ${portfolio.losersCount} red`} />
+          <StatCard label="Holdings" value={String(portfolio.totalTickers)} sub={holdingsStatSub} />
           <StatCard label="Avg Return" value={fmtPct(portfolio.avgReturn)} accent />
           <StatCard label="Best" value={portfolio.bestPerformer?.ticker ?? "—"} sub={portfolio.bestPerformer ? fmtPct(portfolio.bestPerformer.returnPct) : undefined} />
           <StatCard label="Worst" value={portfolio.worstPerformer?.ticker ?? "—"} sub={portfolio.worstPerformer ? fmtPct(portfolio.worstPerformer.returnPct) : undefined} />
           <StatCard label="Win Rate" value={portfolio.totalTickers > 0 ? `${((portfolio.winnersCount / portfolio.totalTickers) * 100).toFixed(0)}%` : "—"} />
-          <StatCard label="Updated" value={portfolio.lastUpdated ? timeAgo(portfolio.lastUpdated) : "—"} sub={portfolio.source ?? undefined} />
+          <StatCard label="Updated" value={portfolio.lastUpdated ? timeAgo(portfolio.lastUpdated) : "—"} sub={updatedStatSub} />
+        </div>
+      )}
+
+      {portfolio?.portfolioNote && (
+        <div
+          className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-2.5 text-xs text-warning leading-relaxed"
+          role="status"
+        >
+          {portfolio.portfolioNote}
         </div>
       )}
 
@@ -689,12 +772,15 @@ export function TradingDashboard() {
         <div className="space-y-4">
           {judgeHoldingsLoading ? (
             <div className="rounded-xl border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-sm text-text-secondary animate-pulse">
-              Loading companies from Omnigraph...
+              Loading companies from Omnigraph (and fallbacks)…
             </div>
           ) : judgeHoldings.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-sm text-text-secondary" role="status">
               <p className="font-medium text-text-primary">No companies available for cross-examination</p>
-              <p className="mt-2">Run the price harvester to populate Omnigraph, or connect to a running Omnigraph instance.</p>
+              <p className="mt-2">
+                {judgeCompaniesMessage ??
+                  "Run the price harvester, set OMNIGRAPH_URL, configure Supabase, or add data/price-db.json."}
+              </p>
             </div>
           ) : (
             <div className="grid gap-6 lg:grid-cols-3">

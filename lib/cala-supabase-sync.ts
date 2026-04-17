@@ -55,16 +55,20 @@ export async function persistCalaRunToSupabase(
   }
 }
 
-/** Sync bad tickers to Supabase (call after `savePersistedBadTickers`). */
+/** Sync bad tickers to Supabase (call after `savePersistedBadTickers`). Idempotent: re-upserts the full local list. */
 export async function syncBadTickersToSupabase(tickers: Set<string>): Promise<void> {
   if (!calaSupabaseSyncEnabled()) return;
   try {
-    let n = 0;
+    let inserted = 0;
     for (const t of tickers) {
-      await addBadTicker(t);
-      n++;
+      if (await addBadTicker(t)) inserted++;
     }
-    if (n > 0) console.log(`📦 Supabase: synced ${n} bad ticker(s)`);
+    const total = tickers.size;
+    if (total > 0) {
+      console.log(
+        `📦 Supabase: bad_tickers ${inserted} new row(s), ${total} symbol(s) in local list (re-sync is idempotent)`,
+      );
+    }
   } catch (e) {
     console.warn(
       `📦 Supabase: bad ticker sync failed — ${e instanceof Error ? e.message : String(e)}`,

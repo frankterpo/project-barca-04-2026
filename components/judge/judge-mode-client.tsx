@@ -25,29 +25,67 @@ export function JudgeModeClient({
     "";
 
   const [ticker, setTicker] = useState(defaultTicker);
+  const [companiesMessage, setCompaniesMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (initialHoldings.length > 0) return;
+    if (initialHoldings.length > 0) {
+      startTransition(() => setLoadingHoldings(false));
+      return;
+    }
 
+    startTransition(() => setLoadingHoldings(true));
+    let active = true;
     const ctrl = new AbortController();
+    const deadline = window.setTimeout(() => ctrl.abort(), 25_000);
     fetch("/api/judge-mode/companies", { signal: ctrl.signal })
-      .then((r) => r.json() as Promise<{ holdings?: Holding[] }>)
-      .then((body) => {
-        if (!ctrl.signal.aborted && body.holdings) {
-          const next = body.holdings!;
+      .then(async (r) => {
+        if (!r.ok) {
+          startTransition(() =>
+            setCompaniesMessage(`Companies request failed (${r.status}). Try again or check server logs.`),
+          );
+          return;
+        }
+        let body: { holdings?: Holding[]; message?: string };
+        try {
+          body = (await r.json()) as { holdings?: Holding[]; message?: string };
+        } catch {
+          startTransition(() =>
+            setCompaniesMessage("Invalid response from /api/judge-mode/companies (not JSON)."),
+          );
+          return;
+        }
+        if (!active || ctrl.signal.aborted) return;
+        const msg = body.message;
+        if (typeof msg === "string") {
+          startTransition(() => setCompaniesMessage(msg));
+        }
+        if (Array.isArray(body.holdings)) {
+          const next = body.holdings;
           startTransition(() => {
             setHoldings(next);
             setTicker((t) => t || next[0]?.ticker || "");
           });
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (active && !ctrl.signal.aborted) {
+          startTransition(() =>
+            setCompaniesMessage("Could not load companies (network error or timeout)."),
+          );
+        }
+      })
       .finally(() => {
-        if (!ctrl.signal.aborted) startTransition(() => setLoadingHoldings(false));
+        window.clearTimeout(deadline);
+        if (active) startTransition(() => setLoadingHoldings(false));
       });
 
-    return () => ctrl.abort();
-  }, [initialHoldings]);
+    return () => {
+      active = false;
+      window.clearTimeout(deadline);
+      ctrl.abort();
+      startTransition(() => setLoadingHoldings(false));
+    };
+  }, [initialHoldings.length]);
   const [presetId, setPresetId] = useState<number | null>(1);
   const [answer, setAnswer] = useState<JudgeAnswer | null>(null);
   const [loading, setLoading] = useState(false);
@@ -90,7 +128,7 @@ export function JudgeModeClient({
   if (loadingHoldings) {
     return (
       <div className="rounded-lg border border-dashed border-border-subtle bg-bg-elevated/40 p-8 text-sm text-text-secondary animate-pulse">
-        Loading companies from Omnigraph...
+        Loading companies from Omnigraph (and fallbacks)…
       </div>
     );
   }
@@ -103,7 +141,8 @@ export function JudgeModeClient({
       >
         <p className="font-medium text-text-primary">No holdings available.</p>
         <p className="mt-2">
-          Run the price harvester to populate Omnigraph, or connect to a running Omnigraph instance.
+          {companiesMessage ??
+            "Run the price harvester, configure Omnigraph (OMNIGRAPH_URL), Supabase, or add data/price-db.json."}
         </p>
       </div>
     );

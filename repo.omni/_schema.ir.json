@@ -1,0 +1,955 @@
+{
+  "ir_version": 1,
+  "interfaces": [],
+  "nodes": [
+    {
+      "name": "AnalystReport",
+      "type_id": 2213400527,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "report_id",
+          "prop_id": 3215504679,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "role",
+          "prop_id": 803256059,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": [
+              "growth",
+              "quality",
+              "risk"
+            ]
+          },
+          "annotations": []
+        },
+        {
+          "name": "score",
+          "prop_id": 2546443267,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "summary",
+          "prop_id": 3666352393,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": [
+        {
+          "Key": [
+            "report_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "CalaEvidence",
+      "type_id": 3622459051,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "entity_uuid",
+          "prop_id": 2455164398,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "evidence_id",
+          "prop_id": 433807662,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "raw_excerpt",
+          "prop_id": 2684520101,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "source_api",
+          "prop_id": 3066475257,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "timestamp",
+          "prop_id": 3308597825,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": [
+        {
+          "Key": [
+            "evidence_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ChairVerdict",
+      "type_id": 2155047571,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "allocation_rationale",
+          "prop_id": 595676283,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "confidence",
+          "prop_id": 3966881439,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "dissent",
+          "prop_id": 2997807559,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "verdict",
+          "prop_id": 2280691500,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": [
+              "neutral",
+              "overweight",
+              "underweight"
+            ]
+          },
+          "annotations": []
+        },
+        {
+          "name": "verdict_id",
+          "prop_id": 126589452,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "Key": [
+            "verdict_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Company",
+      "type_id": 48283596,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "market_cap_usd",
+          "prop_id": 3854545086,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "name",
+          "prop_id": 2975594761,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "index",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "sector",
+          "prop_id": 1423036916,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "ticker",
+          "prop_id": 4270451420,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "Index": [
+            "name"
+          ]
+        },
+        {
+          "Key": [
+            "ticker"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Evidence",
+      "type_id": 1798761076,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "embedding",
+          "prop_id": 1542606295,
+          "prop_type": {
+            "scalar": {
+              "Vector": 1536
+            },
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "embed",
+              "value": "title"
+            },
+            {
+              "name": "index",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "evidence_id",
+          "prop_id": 1136520721,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "excerpt",
+          "prop_id": 3247149543,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "source",
+          "prop_id": 2190839991,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "title",
+          "prop_id": 3811559740,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "index",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "constraints": [
+        {
+          "Index": [
+            "embedding"
+          ]
+        },
+        {
+          "Index": [
+            "title"
+          ]
+        },
+        {
+          "Key": [
+            "evidence_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "FinancialMetric",
+      "type_id": 55454088,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "cadence",
+          "prop_id": 3703268609,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "cala_metric_uuid",
+          "prop_id": 1410577816,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "metric_id",
+          "prop_id": 555445018,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "metric_name",
+          "prop_id": 308858964,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "index",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "period",
+          "prop_id": 454259087,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "unit",
+          "prop_id": 2777089504,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "value",
+          "prop_id": 564253111,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": [
+        {
+          "Index": [
+            "metric_name"
+          ]
+        },
+        {
+          "Key": [
+            "metric_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "JudgeAnswer",
+      "type_id": 3963679238,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "answer",
+          "prop_id": 3344509190,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "answer_id",
+          "prop_id": 4191507542,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "dissent",
+          "prop_id": 4077970726,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "preset_id",
+          "prop_id": 3604760097,
+          "prop_type": {
+            "scalar": "I32",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": [
+        {
+          "Key": [
+            "answer_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "PortfolioRun",
+      "type_id": 320021812,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "benchmark_note",
+          "prop_id": 3595870358,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "branch_label",
+          "prop_id": 3365077903,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "portfolio_value_usd",
+          "prop_id": 682668899,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "return_pct",
+          "prop_id": 671940732,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "run_id",
+          "prop_id": 1754889041,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "updated_at",
+          "prop_id": 3091920555,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": [
+        {
+          "Key": [
+            "run_id"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "ResearchFinding",
+      "type_id": 6588841,
+      "annotations": [],
+      "implements": [],
+      "properties": [
+        {
+          "name": "finding_id",
+          "prop_id": 2982288178,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "key",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "finding_type",
+          "prop_id": 1922525511,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": [
+            {
+              "name": "index",
+              "value": null
+            }
+          ]
+        },
+        {
+          "name": "run_id",
+          "prop_id": 3004631302,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "score",
+          "prop_id": 120793265,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        },
+        {
+          "name": "summary",
+          "prop_id": 149159879,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": [
+        {
+          "Index": [
+            "finding_type"
+          ]
+        },
+        {
+          "Key": [
+            "finding_id"
+          ]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "name": "AnalyzedBy",
+      "type_id": 2465666187,
+      "from_type": "Company",
+      "to_type": "AnalystReport",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "BelongsToRun",
+      "type_id": 659853604,
+      "from_type": "Company",
+      "to_type": "PortfolioRun",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "Cites",
+      "type_id": 1736889142,
+      "from_type": "AnalystReport",
+      "to_type": "Evidence",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "CompetesWith",
+      "type_id": 65279940,
+      "from_type": "Company",
+      "to_type": "Company",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "Decided",
+      "type_id": 1373171710,
+      "from_type": "Company",
+      "to_type": "ChairVerdict",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "HasCalaEvidence",
+      "type_id": 2367050420,
+      "from_type": "Company",
+      "to_type": "CalaEvidence",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "HasFinding",
+      "type_id": 1793487283,
+      "from_type": "Company",
+      "to_type": "ResearchFinding",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "HasMetric",
+      "type_id": 2680640974,
+      "from_type": "Company",
+      "to_type": "FinancialMetric",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "Holds",
+      "type_id": 1192869736,
+      "from_type": "PortfolioRun",
+      "to_type": "Company",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [
+        {
+          "name": "conviction_band",
+          "prop_id": 1299322788,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": false,
+            "list": false,
+            "enum_values": [
+              "A",
+              "B",
+              "C"
+            ]
+          },
+          "annotations": []
+        },
+        {
+          "name": "weight_pct",
+          "prop_id": 1375487246,
+          "prop_type": {
+            "scalar": "F64",
+            "nullable": false,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": []
+    },
+    {
+      "name": "JudgeCites",
+      "type_id": 3600921759,
+      "from_type": "JudgeAnswer",
+      "to_type": "Evidence",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "Judged",
+      "type_id": 2147167755,
+      "from_type": "Company",
+      "to_type": "JudgeAnswer",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    },
+    {
+      "name": "SuppliesTo",
+      "type_id": 3209455492,
+      "from_type": "Company",
+      "to_type": "Company",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [
+        {
+          "name": "context",
+          "prop_id": 3497052293,
+          "prop_type": {
+            "scalar": "String",
+            "nullable": true,
+            "list": false,
+            "enum_values": null
+          },
+          "annotations": []
+        }
+      ],
+      "constraints": []
+    },
+    {
+      "name": "Supports",
+      "type_id": 4071574118,
+      "from_type": "Evidence",
+      "to_type": "Company",
+      "cardinality": {
+        "min": 0,
+        "max": null
+      },
+      "annotations": [],
+      "properties": [],
+      "constraints": []
+    }
+  ]
+}

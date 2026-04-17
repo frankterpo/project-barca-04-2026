@@ -20,6 +20,24 @@ export interface CalaPriceEntry {
   returnPct: number;
 }
 
+/**
+ * Recompute returnPct from prices when possible so rankings match Cala’s mark-to-market
+ * (stale or hand-edited `returnPct` in price-db would otherwise mis-order tickers).
+ */
+export function calibrateCalaPriceEntry(e: CalaPriceEntry): CalaPriceEntry {
+  const ticker = e.ticker.trim().toUpperCase();
+  if (e.purchasePrice > 0 && Number.isFinite(e.evalPrice)) {
+    const returnPct = ((e.evalPrice - e.purchasePrice) / e.purchasePrice) * 100;
+    return { ...e, ticker, returnPct };
+  }
+  return { ...e, ticker };
+}
+
+/** Calibrate each row and sort by return descending (best first). */
+export function calibrateAndSortPriceEntries(entries: CalaPriceEntry[]): CalaPriceEntry[] {
+  return [...entries].map(calibrateCalaPriceEntry).sort((a, b) => b.returnPct - a.returnPct);
+}
+
 export interface CalaPortfolioAudit {
   name: string;
   lineCount: number;
@@ -215,6 +233,42 @@ export function buildTripleConcentration(entries: CalaPriceEntry[]): CalaAllocat
     k++;
   }
   return top50.map((e, i) => ({ nasdaq_code: e.ticker, amount: amounts[i] }));
+}
+
+/**
+ * Like top_weighted but discretionary budget is split with return^`power` weights on the top N names.
+ * When several moonshots cluster below #1, this often beats plain max_concentrate in projected terminal value.
+ */
+export function buildPowerTopWeighted(
+  entries: CalaPriceEntry[],
+  opts?: { topN?: number; power?: number },
+): CalaAllocationRow[] {
+  const topN = Math.min(Math.max(2, opts?.topN ?? 8), 50);
+  const power = opts?.power ?? 2;
+  const top50 = entries.slice(0, 50);
+  if (top50.length < CALA_PORTFOLIO_MIN_STOCKS) {
+    return buildMaxConcentration(entries);
+  }
+  const disc = CALA_PORTFOLIO_TOTAL_BUDGET - CALA_PORTFOLIO_MIN_PER_STOCK * 50;
+  const amounts = top50.map(() => CALA_PORTFOLIO_MIN_PER_STOCK);
+  const nLeader = Math.min(topN, top50.length);
+  const weights = top50.slice(0, nLeader).map((e) => Math.pow(Math.max(0.01, e.returnPct), power));
+  const sumW = weights.reduce((s, w) => s + w, 0) || 1;
+  let allocated = 0;
+  for (let i = 0; i < nLeader; i++) {
+    const add = Math.floor(disc * (weights[i] / sumW));
+    amounts[i] += add;
+    allocated += add;
+  }
+  let rem = disc - allocated;
+  const order = [...Array(nLeader).keys()].sort((a, b) => weights[b] - weights[a]);
+  let k = 0;
+  while (rem > 0) {
+    amounts[order[k % nLeader]]++;
+    rem--;
+    k++;
+  }
+  return top50.map((e, i) => ({ nasdaq_code: e.ticker.toUpperCase(), amount: amounts[i] }));
 }
 
 /** Lookup table keyed by upper-case ticker (matches `nasdaq_code` from builders). */

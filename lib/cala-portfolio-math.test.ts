@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   auditAllocations,
   buildMaxConcentration,
+  buildPowerTopWeighted,
   buildTopWeighted,
+  calibrateAndSortPriceEntries,
+  calibrateCalaPriceEntry,
   CALA_PORTFOLIO_TOTAL_BUDGET,
   type CalaPriceEntry,
   priceEntriesToLookup,
@@ -23,6 +26,30 @@ function fakeEntries(returns: number[]): CalaPriceEntry[] {
     };
   });
 }
+
+describe("calibrateCalaPriceEntry", () => {
+  it("recomputes returnPct from prices", () => {
+    const e: CalaPriceEntry = {
+      ticker: "x",
+      purchasePrice: 10,
+      evalPrice: 30,
+      returnPct: 5,
+    };
+    const c = calibrateCalaPriceEntry(e);
+    expect(c.ticker).toBe("X");
+    expect(c.returnPct).toBeCloseTo(200, 5);
+  });
+});
+
+describe("calibrateAndSortPriceEntries", () => {
+  it("orders by calibrated return, not stale field", () => {
+    const a: CalaPriceEntry = { ticker: "A", purchasePrice: 1, evalPrice: 2, returnPct: 999 };
+    const b: CalaPriceEntry = { ticker: "B", purchasePrice: 1, evalPrice: 5, returnPct: 1 };
+    const sorted = calibrateAndSortPriceEntries([a, b]);
+    expect(sorted[0].ticker).toBe("B");
+    expect(sorted[1].ticker).toBe("A");
+  });
+});
 
 describe("auditAllocations", () => {
   it("accepts a valid max-concentration portfolio", () => {
@@ -82,5 +109,15 @@ describe("max concentration dominates linear objective", () => {
     const vTop = projectedTerminalValueUsd(topW, lu);
     expect(vMax).toBeGreaterThan(vTop);
     expect(projectedReturnPctFromValue(vMax)).toBeGreaterThan(projectedReturnPctFromValue(vTop));
+  });
+
+  it("buildPowerTopWeighted is valid and spreads discretionary across top names vs max_concentrate", () => {
+    const returns = [400, 350, 300, 280, 260, 240, 220, 200, ...Array(42).fill(2)];
+    const entries = fakeEntries(returns);
+    const pow = buildPowerTopWeighted(entries, { topN: 8, power: 2 });
+    expect(validateAllocationsError(pow)).toBeNull();
+    const max = buildMaxConcentration(entries);
+    expect(pow[0].amount).toBeLessThan(max[0].amount);
+    expect(pow[1].amount).toBeGreaterThan(max[1].amount);
   });
 });
